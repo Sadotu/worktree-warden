@@ -1,5 +1,20 @@
 import { run as defaultRun } from './proc.js';
 
+const EXIT_CODE_FOR_STATUS = { cleaned: 0, 'already-clean': 0, waiting: 10, blocked: 20, retry: 30 };
+const REQUIRED_FIELDS = ['pr', 'issue', 'branch', 'merge_mode', 'reason'];
+
+function isValidRecord(record, exitCode, expectedPr, expectedIssue) {
+  if (!record || typeof record !== 'object') return false;
+  if (!(record.status in EXIT_CODE_FOR_STATUS)) return false;
+  for (const field of REQUIRED_FIELDS) {
+    if (!(field in record)) return false;
+  }
+  if (exitCode !== EXIT_CODE_FOR_STATUS[record.status]) return false;
+  if (String(record.pr) !== String(expectedPr)) return false;
+  if (String(record.issue) !== String(expectedIssue)) return false;
+  return true;
+}
+
 export function invokeCleanup(scriptPath, prNumber, issueNumber, opts = {}) {
   const run = opts.run ?? defaultRun;
   const result = run(scriptPath, [String(prNumber), String(issueNumber)], {});
@@ -15,14 +30,14 @@ export function invokeCleanup(scriptPath, prNumber, issueNumber, opts = {}) {
     }
   }
 
-  if (record && typeof record.status === 'string') {
+  if (record && isValidRecord(record, result.status, prNumber, issueNumber)) {
     return {
       status: record.status,
-      pr: record.pr ?? String(prNumber),
-      issue: record.issue ?? String(issueNumber),
-      branch: record.branch ?? null,
-      merge_mode: record.merge_mode ?? null,
-      reason: record.reason ?? null,
+      pr: record.pr,
+      issue: record.issue,
+      branch: record.branch,
+      merge_mode: record.merge_mode,
+      reason: record.reason,
       diagnostic,
     };
   }
@@ -33,7 +48,9 @@ export function invokeCleanup(scriptPath, prNumber, issueNumber, opts = {}) {
     issue: String(issueNumber),
     branch: null,
     merge_mode: null,
-    reason: 'invocation-failed',
-    diagnostic: diagnostic || 'cleanup script produced no parseable output',
+    reason: record ? 'invalid-cleanup-output' : 'invocation-failed',
+    diagnostic: diagnostic || (record
+      ? 'cleanup script produced output that failed contract validation'
+      : 'cleanup script produced no parseable output'),
   };
 }
