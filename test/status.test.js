@@ -31,6 +31,19 @@ test('renderStatus lists a pending candidate and a blocked attention item, count
   assert.match(report, /agent\/2-demo: blocked/);
   assert.match(report, /attention items: 1/);
   assert.match(report, /worktree-dirty/);
+  assert.match(report, /diagnostic=uncommitted changes/);
+});
+
+test('renderStatus renders pr #— and issue #— for a branch attention item with no pr/issue identity', () => {
+  const dir = tmpDir();
+  saveStore(dir, {
+    'agent/1-demo': { branch: 'agent/1-demo', pr: null, issue: null, status: 'retry', reason: 'token-mint-failed', diagnostic: 'could not resolve installation id', updatedAt: '2026-08-15T00:00:00.000Z' },
+  });
+  const report = renderStatus(dir);
+  assert.match(report, /pr #—/);
+  assert.match(report, /issue #—/);
+  assert.doesNotMatch(report, /pr #null/);
+  assert.doesNotMatch(report, /issue #null/);
 });
 
 test('renderStatus renders a DAEMON_ERROR_KEY entry as a distinct daemon-error line and counts it as an attention item', () => {

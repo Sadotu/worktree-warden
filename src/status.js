@@ -25,7 +25,7 @@ export function renderStatus(stateDir) {
         lines.push(`    ${branch}: pending (pr #${candidate.pr}, issue #${candidate.issue}, updated=${candidate.updatedAt})`);
       } else {
         lines.push(
-          `  ! ${branch}: ${candidate.status} (pr #${candidate.pr}, issue #${candidate.issue}, reason=${candidate.reason ?? 'unknown'}, updated=${candidate.updatedAt})`
+          `  ! ${branch}: ${candidate.status} (pr #${candidate.pr ?? '—'}, issue #${candidate.issue ?? '—'}, reason=${candidate.reason ?? 'unknown'}, diagnostic=${candidate.diagnostic ?? ''}, updated=${candidate.updatedAt})`
         );
       }
     }
