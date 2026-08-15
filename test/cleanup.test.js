@@ -1,49 +1,80 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { runCleanup, classifyAfterRetries } from '../src/cleanup.js';
+import { invokeCleanup } from '../src/cleanup.js';
 
-test('runCleanup reports cleaned on exit 0', () => {
+test('invokeCleanup parses a cleaned JSON record', () => {
   const run = (cmd, args) => {
     assert.equal(cmd, '/path/cleanup-merged.sh');
-    assert.deepEqual(args, ['2', '1']);
-    return { status: 0, stdout: '', stderr: '' };
+    assert.deepEqual(args, ['5', '1']);
+    return {
+      status: 0,
+      stdout: '{"status":"cleaned","pr":"5","issue":"1","branch":"agent/1-demo","merge_mode":"regular","reason":"cleanup-complete"}\n',
+      stderr: '',
+    };
   };
-  assert.deepEqual(runCleanup('/path/cleanup-merged.sh', 2, 1, { run }), { outcome: 'cleaned', stderr: '' });
+  const result = invokeCleanup('/path/cleanup-merged.sh', 5, 1, { run });
+  assert.equal(result.status, 'cleaned');
+  assert.equal(result.pr, '5');
+  assert.equal(result.issue, '1');
+  assert.equal(result.branch, 'agent/1-demo');
+  assert.equal(result.merge_mode, 'regular');
+  assert.equal(result.reason, 'cleanup-complete');
+  assert.equal(result.diagnostic, '');
 });
 
-test('runCleanup reports blocked on a known guard-refusal message', () => {
-  const run = () => ({ status: 1, stdout: '', stderr: 'Refusing to delete non-agent branch: main\n' });
-  const result = runCleanup('/path/cleanup-merged.sh', 2, 1, { run });
-  assert.equal(result.outcome, 'blocked');
+test('invokeCleanup parses an already-clean record', () => {
+  const run = () => ({
+    status: 0,
+    stdout: '{"status":"already-clean","pr":"5","issue":"1","branch":"agent/1-demo","merge_mode":null,"reason":"nothing-to-clean"}\n',
+    stderr: '',
+  });
+  const result = invokeCleanup('/path/cleanup-merged.sh', 5, 1, { run });
+  assert.equal(result.status, 'already-clean');
 });
 
-test('runCleanup reports blocked for each known refusal pattern', () => {
-  const messages = [
-    'Cannot prove agent/1-demo landed in origin/main',
-    'Artifact manifest is not a regular file: x',
-    'Recorded artifact is missing or not a regular file: x',
-    'Invalid artifact manifest path: x',
-    'Duplicate artifact manifest path: x',
-    'Unrecorded cleanup candidate: x; move/remove it manually',
-  ];
-  for (const message of messages) {
-    const run = () => ({ status: 1, stdout: '', stderr: message });
-    assert.equal(runCleanup('/path/cleanup-merged.sh', 2, 1, { run }).outcome, 'blocked', message);
-  }
+test('invokeCleanup parses a blocked record with a human diagnostic on stderr', () => {
+  const run = () => ({
+    status: 20,
+    stdout: '{"status":"blocked","pr":"5","issue":"1","branch":"agent/1-demo","merge_mode":null,"reason":"worktree-dirty"}\n',
+    stderr: 'Worktree /path has uncommitted changes\n',
+  });
+  const result = invokeCleanup('/path/cleanup-merged.sh', 5, 1, { run });
+  assert.equal(result.status, 'blocked');
+  assert.equal(result.reason, 'worktree-dirty');
+  assert.equal(result.diagnostic, 'Worktree /path has uncommitted changes');
 });
 
-test('runCleanup reports retry for an unrecognized non-zero exit', () => {
+test('invokeCleanup parses a retry record', () => {
+  const run = () => ({
+    status: 30,
+    stdout: '{"status":"retry","pr":"5","issue":"1","branch":"agent/1-demo","merge_mode":null,"reason":"fetch-failed"}\n',
+    stderr: 'unable to fetch from origin\n',
+  });
+  const result = invokeCleanup('/path/cleanup-merged.sh', 5, 1, { run });
+  assert.equal(result.status, 'retry');
+  assert.equal(result.reason, 'fetch-failed');
+});
+
+test('invokeCleanup synthesizes a retry result when the process failed to spawn', () => {
+  const run = () => ({ status: 127, stdout: '', stderr: 'bash: /path/cleanup-merged.sh: No such file or directory\n' });
+  const result = invokeCleanup('/path/cleanup-merged.sh', 5, 1, { run });
+  assert.equal(result.status, 'retry');
+  assert.equal(result.reason, 'invocation-failed');
+  assert.match(result.diagnostic, /No such file or directory/);
+  assert.equal(result.pr, '5');
+  assert.equal(result.issue, '1');
+});
+
+test('invokeCleanup synthesizes a retry result when stdout is present but not JSON', () => {
+  const run = () => ({ status: 1, stdout: 'not json at all\n', stderr: '' });
+  const result = invokeCleanup('/path/cleanup-merged.sh', 5, 1, { run });
+  assert.equal(result.status, 'retry');
+  assert.equal(result.reason, 'invocation-failed');
+});
+
+test('invokeCleanup gives a generic diagnostic when both stdout and stderr are empty', () => {
   const run = () => ({ status: 1, stdout: '', stderr: '' });
-  assert.equal(runCleanup('/path/cleanup-merged.sh', 2, 1, { run }).outcome, 'retry');
-});
-
-test('classifyAfterRetries leaves non-retry outcomes untouched', () => {
-  assert.equal(classifyAfterRetries('cleaned', 10, 5), 'cleaned');
-  assert.equal(classifyAfterRetries('blocked', 10, 5), 'blocked');
-});
-
-test('classifyAfterRetries escalates retry to blocked past the threshold', () => {
-  assert.equal(classifyAfterRetries('retry', 4, 5), 'retry');
-  assert.equal(classifyAfterRetries('retry', 5, 5), 'blocked');
-  assert.equal(classifyAfterRetries('retry', 6, 5), 'blocked');
+  const result = invokeCleanup('/path/cleanup-merged.sh', 5, 1, { run });
+  assert.equal(result.status, 'retry');
+  assert.match(result.diagnostic, /no parseable output/);
 });
