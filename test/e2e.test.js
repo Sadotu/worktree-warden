@@ -28,9 +28,9 @@ test('end-to-end: real worktree discovery feeds runOnce, which cleans a merged b
     stateDir,
     cleanupScript: '/unused',
     mint: () => 'tok',
-    findPR: (branch) => {
+    findPRs: (branch) => {
       assert.equal(branch, 'agent/7-e2e-demo');
-      return { number: 99, state: 'MERGED' };
+      return [{ number: 99, state: 'MERGED', closingIssuesReferences: [{ number: 7 }] }];
     },
     cleanup: (pr, issue) => {
       cleanupCalls += 1;

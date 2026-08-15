@@ -1,9 +1,11 @@
 import { resolvePrimaryWorkspace, resolveRepoSlug, resolveStateDir, resolveCleanupScriptPath } from './repo.js';
 import { discoverAgentWorktrees } from './discovery.js';
-import { mintToken, findPullRequestForBranch } from './github.js';
+import { mintToken, findPullRequestsForBranch, resolveTerminalCandidate } from './github.js';
 import { invokeCleanup } from './cleanup.js';
 import { loadStore, saveStore, getCandidate, setPending, setAttention, clearCandidate } from './store.js';
 import { appendLog } from './log.js';
+
+export const DAEMON_ERROR_KEY = '__runOnce__';
 
 export function runOnce(options = {}) {
   const cwd = options.cwd ?? process.cwd();
@@ -13,7 +15,7 @@ export function runOnce(options = {}) {
   const cleanupScript = options.cleanupScript ?? resolveCleanupScriptPath(primaryWorkspace);
   const discover = options.discover ?? (() => discoverAgentWorktrees(primaryWorkspace));
   const mint = options.mint ?? (() => mintToken(repoSlug));
-  const findPR = options.findPR ?? ((branch, token) => findPullRequestForBranch(repoSlug, branch, token));
+  const findPRs = options.findPRs ?? ((branch, token) => findPullRequestsForBranch(repoSlug, branch, token));
   const cleanup = options.cleanup ?? ((pr, issue) => invokeCleanup(cleanupScript, pr, issue));
   const log = options.log ?? ((level, message) => appendLog(stateDir, level, message));
 
@@ -37,9 +39,7 @@ export function runOnce(options = {}) {
   };
 
   // Pass 1: resume any candidate still pending from an interrupted run,
-  // regardless of whether its worktree is still discoverable — dropping it
-  // here just because discovery can't see it anymore is exactly the data
-  // loss this pass exists to prevent.
+  // regardless of whether its worktree is still discoverable.
   for (const branch of Object.keys(store)) {
     const candidate = store[branch];
     if (candidate.status !== 'pending') continue;
@@ -47,7 +47,11 @@ export function runOnce(options = {}) {
   }
 
   // Pass 2: discover newly terminal candidates among currently-visible
-  // agent worktrees that have no store entry yet.
+  // agent worktrees that have no store entry yet. Every failure here — a
+  // failed mint, a failed PR lookup, or an ambiguous PR/issue relationship
+  // — writes a permanent attention item immediately. None of them is
+  // retried automatically; the branch is simply skipped on every future
+  // cycle until a human clears it.
   const worktrees = discover();
   for (const wt of worktrees) {
     if (getCandidate(store, wt.branch)) continue; // pending (Pass 1 handled it) or has an attention item (no auto-retry)
@@ -56,23 +60,41 @@ export function runOnce(options = {}) {
     try {
       token = mint();
     } catch (err) {
-      log('warn', `${wt.branch}: token mint failed, will retry next cycle: ${err.message}`);
+      log('error', `${wt.branch}: token mint failed: ${err.message}`);
+      store = setAttention(store, wt.branch, {
+        pr: null, issue: wt.issueNumber, status: 'retry', reason: 'token-mint-failed', diagnostic: err.message,
+      });
+      saveStore(stateDir, store);
       continue;
     }
 
-    let pr;
+    let rows;
     try {
-      pr = findPR(wt.branch, token);
+      rows = findPRs(wt.branch, token);
     } catch (err) {
-      log('warn', `${wt.branch}: PR lookup failed, will retry next cycle: ${err.message}`);
+      log('error', `${wt.branch}: PR lookup failed: ${err.message}`);
+      store = setAttention(store, wt.branch, {
+        pr: null, issue: wt.issueNumber, status: 'retry', reason: 'pr-lookup-failed', diagnostic: err.message,
+      });
+      saveStore(stateDir, store);
       continue;
     }
 
-    if (!pr || pr.state === 'OPEN') continue;
+    const resolved = resolveTerminalCandidate(rows);
+    if (resolved.kind === 'waiting') continue;
 
-    store = setPending(store, wt.branch, { pr: pr.number, issue: wt.issueNumber });
+    if (resolved.kind === 'ambiguous') {
+      log('error', `${wt.branch}: blocked (pr/issue relationship unresolved): ${resolved.reason}`);
+      store = setAttention(store, wt.branch, {
+        pr: null, issue: wt.issueNumber, status: 'blocked', reason: 'pr-issue-ambiguous', diagnostic: resolved.reason,
+      });
+      saveStore(stateDir, store);
+      continue;
+    }
+
+    store = setPending(store, wt.branch, { pr: resolved.number, issue: resolved.issue });
     saveStore(stateDir, store);
-    resolveCandidate(wt.branch, pr.number, wt.issueNumber);
+    resolveCandidate(wt.branch, resolved.number, resolved.issue);
   }
 
   return store;
@@ -90,6 +112,15 @@ export function loop(options = {}) {
       runOnce(options);
     } catch (err) {
       appendLog(stateDir, 'error', `runOnce failed: ${err.message}`);
+      try {
+        let store = loadStore(stateDir);
+        store = setAttention(store, DAEMON_ERROR_KEY, {
+          pr: null, issue: null, status: 'retry', reason: 'runOnce-failed', diagnostic: err.message,
+        });
+        saveStore(stateDir, store);
+      } catch {
+        // best-effort; the log line above is the fallback record if this also fails.
+      }
     }
     if (!stopped) timer = setTimeout(tick, intervalMs);
   };
