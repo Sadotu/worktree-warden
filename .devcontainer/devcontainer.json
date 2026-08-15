@@ -1,0 +1,27 @@
+{
+  "name": "worktree-warden-agents",
+  "image": "ghcr.io/sadotu/agent-devcontainer:latest",
+  "workspaceFolder": "/workspaces/worktree-warden",
+  "workspaceMount": "source=${localWorkspaceFolder},target=/workspaces/worktree-warden,type=bind,consistency=cached",
+  "mounts": [
+    "source=worktree-warden-claude-config,target=/home/vscode/.claude,type=volume",
+    "source=worktree-warden-codex-config,target=/home/vscode/.codex,type=volume",
+    "source=worktree-warden-gh-config,target=/home/vscode/.config/gh,type=volume",
+    "source=worktree-warden-github-app-config,target=/home/vscode/.config/github-app,type=volume",
+    "source=worktree-warden-shell-history,target=/home/vscode/.history,type=volume"
+  ],
+  "remoteUser": "vscode",
+  "runArgs": ["--init", "--security-opt", "no-new-privileges", "--network=agent-services"],
+  "containerEnv": {
+    "HISTFILE": "/home/vscode/.history/.bash_history",
+    "CLAUDE_CODE_OAUTH_TOKEN": "${localEnv:CLAUDE_CODE_OAUTH_TOKEN}",
+    "SENTINEL_URL": "http://usage-sentinel:4317",
+    "PROJECT_NAME": "worktree-warden",
+    "GH_OWNER": "Sadotu",
+    "APP_ID": "4217970"
+  },
+  "postCreateCommand": "/opt/agent-devcontainer/setup-agents.sh",
+  "customizations": {
+    "vscode": { "extensions": ["anthropic.claude-code", "dbaeumer.vscode-eslint"] }
+  }
+}

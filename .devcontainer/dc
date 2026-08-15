@@ -1,0 +1,463 @@
+#!/usr/bin/env bash
+# CLI-first devcontainer helper — no VS Code required.
+# Wraps @devcontainers/cli against this workspace.
+#
+# Host-side only — runs before any container exists, so unlike the other
+# .devcontainer/ scripts this one stays a small per-project file rather than
+# baked into the shared image (see Dockerfile). PROJECT_NAME defaults to the
+# workspace directory's name; override by exporting PROJECT_NAME if the repo
+# dir doesn't match the name declared in devcontainer.json's containerEnv.
+#
+#   ./.devcontainer/dc up        build + start the container (runs postCreate)
+#   ./.devcontainer/dc shell     open an interactive bash shell inside
+#   ./.devcontainer/dc setup     re-run setup-agents.sh inside the running
+#                                  container (retry after a failed Bitwarden
+#                                  unlock / postCreate, no rebuild needed)
+#   ./.devcontainer/dc exec ...   run a one-off command inside
+#   ./.devcontainer/dc codex-push
+#                                  upload the container's ~/.codex/auth.json to
+#                                  Bitwarden, then update host/global auth.json
+#   ./.devcontainer/dc codex-pull --force
+#                                  overwrite container and host/global auth.json
+#                                  from vault (--force required — clobbers a
+#                                  possibly live, already-refreshed token)
+#   ./.devcontainer/dc rebuild   rebuild image from scratch, then start
+#   ./.devcontainer/dc self-update
+#                                  overwrite this per-project dc with the
+#                                  canonical copy baked into the image (backup
+#                                  kept as dc.bak). up/rebuild warn on drift.
+#   ./.devcontainer/dc sentinel-update
+#                                  pull + recreate usage-sentinel (data kept)
+#   ./.devcontainer/dc down      stop + remove the container (volumes kept)
+#   ./.devcontainer/dc nuke      stop + remove the container (volumes kept)
+#   ./.devcontainer/dc wipe-volumes --yes
+#                                  delete persisted agent config/auth volumes
+#
+# Requires: docker daemon reachable, and `devcontainer` CLI
+#   (npm i -g @devcontainers/cli).
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+CONTAINER_LABEL="devcontainer.local_folder=$ROOT"
+PROJECT_NAME="${PROJECT_NAME:-$(basename "$ROOT")}"
+
+require() {
+  command -v "$1" >/dev/null 2>&1 || {
+    echo "ERROR: '$1' not found. $2" >&2
+    exit 1
+  }
+}
+
+require docker "Install Docker Desktop and enable WSL integration for this distro."
+docker ps >/dev/null 2>&1 || {
+  echo "ERROR: docker daemon not reachable." >&2
+  echo "Enable Docker Desktop → Settings → Resources → WSL Integration for this distro." >&2
+  exit 1
+}
+require devcontainer "Install with: npm i -g @devcontainers/cli"
+
+cmd="${1:-}"
+shift || true
+
+codex_auth_file_valid() {
+  jq -e '.tokens.refresh_token | type == "string" and length > 0' "$1" >/dev/null 2>&1
+}
+
+CODEX_SYNC_HANDOFF=""
+CODEX_SYNC_STAGE=""
+CODEX_SYNC_BACKUP=""
+
+cleanup_codex_sync() {
+  rm -f -- "$CODEX_SYNC_HANDOFF" "$CODEX_SYNC_STAGE" "$CODEX_SYNC_BACKUP"
+}
+
+sync_codex_auth() {
+  local mode="$1"; shift
+  local host_auth="${CODEX_HOME:-$HOME/.codex}/auth.json"
+  local handoff auth_dir stage backup="" had_original=0
+
+  require jq "Install jq to validate Codex auth before updating host credentials."
+  auth_dir="$(dirname "$host_auth")"
+  mkdir -p "$auth_dir"
+  handoff="$(mktemp "$auth_dir/.codex-auth-handoff.XXXXXX")"
+  CODEX_SYNC_HANDOFF="$handoff"
+  trap cleanup_codex_sync EXIT
+  chmod 600 "$handoff"
+
+  if ! devcontainer exec --workspace-folder "$ROOT" env \
+    CODEX_AUTH_HANDOFF=stdout \
+    /opt/agent-devcontainer/codex-auth-sync.sh "$mode" "$@" >"$handoff"; then
+    rm -f -- "$handoff"
+    return 1
+  fi
+
+  if [ ! -f "$handoff" ] || [ -L "$handoff" ]; then
+    echo "ERROR: container returned unsafe Codex auth handoff; host auth unchanged." >&2
+    rm -f -- "$handoff"
+    return 1
+  fi
+  if [ "$(stat -c '%a' "$handoff")" != 600 ]; then
+    echo "ERROR: container returned Codex auth handoff without mode 0600 ($(stat -c '%a' "$handoff")); host auth unchanged." >&2
+    rm -f -- "$handoff"
+    return 1
+  fi
+  if ! codex_auth_file_valid "$handoff"; then
+    echo "ERROR: container returned invalid Codex auth handoff; host auth unchanged." >&2
+    rm -f -- "$handoff"
+    return 1
+  fi
+
+  stage="$(mktemp "$auth_dir/.auth.json.stage.XXXXXX")"
+  CODEX_SYNC_STAGE="$stage"
+  chmod 600 "$stage"
+  if ! cp -- "$handoff" "$stage"; then
+    rm -f -- "$handoff" "$stage"
+    return 1
+  fi
+
+  if [ -e "$host_auth" ]; then
+    had_original=1
+    backup="$(mktemp "$auth_dir/.codex-auth-backup.XXXXXX")"
+    CODEX_SYNC_BACKUP="$backup"
+    chmod 600 "$backup"
+    if ! cp -- "$host_auth" "$backup"; then
+      rm -f -- "$handoff" "$stage" "$backup"
+      return 1
+    fi
+  fi
+
+  if ! mv -f -- "$stage" "$host_auth" || \
+     ! codex_auth_file_valid "$host_auth" || \
+     [ "$(stat -c '%a' "$host_auth")" != 600 ]; then
+    echo "ERROR: failed to install valid mode-0600 host Codex auth; restoring previous file." >&2
+    rm -f -- "$stage"
+    if [ "$had_original" -eq 1 ]; then
+      mv -f -- "$backup" "$host_auth" || {
+        echo "ERROR: failed to restore previous host Codex auth from $backup." >&2
+        rm -f -- "$handoff"
+        # Sole copy of previous auth. Exempt it from EXIT cleanup so operator
+        # can recover from exact path reported above.
+        CODEX_SYNC_BACKUP=""
+        return 1
+      }
+      backup=""
+      CODEX_SYNC_BACKUP=""
+    else
+      rm -f -- "$host_auth"
+    fi
+    rm -f -- "$handoff" "$backup"
+    return 1
+  fi
+
+  rm -f -- "$handoff" "$backup"
+  CODEX_SYNC_HANDOFF=""
+  CODEX_SYNC_STAGE=""
+  CODEX_SYNC_BACKUP=""
+  trap - EXIT
+  echo "Updated host Codex auth at $host_auth."
+}
+
+# Canonical `dc` lives here inside the image (see Dockerfile / init.sh). It is
+# the single source of truth every project's per-project `dc` is scaffolded
+# from, so a project copy that differs from it has drifted.
+DC_TEMPLATE_PATH="/opt/agent-devcontainer/templates/dc"
+
+# The image this project runs, parsed from devcontainer.json. Empty for a
+# `build`-based devcontainer.json (no "image" key) — e.g. this source repo,
+# whose own `dc` IS the canonical one.
+dc_image() {
+  sed -n 's/.*"image"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
+    "$ROOT/.devcontainer/devcontainer.json" | head -1
+}
+
+# Re-pull the referenced image before creating the container. Without this,
+# a floating tag like :latest silently reuses whatever digest is in the
+# local Docker cache — `devcontainer up`, even with --build-no-cache, never
+# passes --pull, so published image updates (setup-agents.sh fixes, CLI
+# bumps) would not reach this machine. No-op for a `build`-based
+# devcontainer.json (no "image" key) and non-fatal offline.
+pull_image() {
+  local image
+  image="$(dc_image)"
+  if [ -n "$image" ]; then
+    echo "Pulling $image ..."
+    docker pull "$image" || echo "WARNING: pull failed — using local copy if present."
+  fi
+}
+
+# Write the canonical `dc` (baked template from the image) to $1. Returns
+# nonzero — leaving $1 empty — when there's no image key or the image predates
+# the baked template. Image has no ENTRYPOINT, so the `cat` runs as given.
+extract_canonical_dc() {
+  local image
+  image="$(dc_image)"
+  [ -n "$image" ] || return 1
+  docker run --rm "$image" cat "$DC_TEMPLATE_PATH" >"$1" 2>/dev/null || return 1
+  [ -s "$1" ]
+}
+
+# Non-fatal drift check for up/rebuild: warn if the local per-project `dc`
+# differs from the canonical baked template. Silent no-op when the canonical
+# copy can't be read (offline, older image, build-based project) so it never
+# blocks the container coming up.
+warn_if_dc_drifted() {
+  local canonical
+  canonical="$(mktemp)"
+  if extract_canonical_dc "$canonical" && ! cmp -s "$canonical" "$ROOT/.devcontainer/dc"; then
+    echo "WARNING: .devcontainer/dc differs from the canonical copy baked into $(dc_image)." >&2
+    echo "         Run './.devcontainer/dc self-update' to sync it (a backup is kept as dc.bak)." >&2
+  fi
+  rm -f -- "$canonical"
+}
+
+# Replace the local per-project `dc` with the canonical baked template. Writes
+# to a temp file then `mv`s over `dc`, so this very script (still executing)
+# keeps its original open inode intact.
+self_update_dc() {
+  local dest="$ROOT/.devcontainer/dc" image canonical
+  image="$(dc_image)"
+  if [ -z "$image" ]; then
+    echo "ERROR: no \"image\" in devcontainer.json; nothing to self-update against." >&2
+    exit 1
+  fi
+  echo "Pulling $image ..."
+  docker pull "$image" || echo "WARNING: pull failed — using local image if present." >&2
+  canonical="$(mktemp)"
+  if ! extract_canonical_dc "$canonical"; then
+    rm -f -- "$canonical"
+    echo "ERROR: image $image has no baked dc template at $DC_TEMPLATE_PATH; update the image first." >&2
+    exit 1
+  fi
+  if cmp -s "$canonical" "$dest"; then
+    rm -f -- "$canonical"
+    echo "dc already matches the canonical template — nothing to do."
+    return
+  fi
+  cp -- "$dest" "$dest.bak"
+  chmod +x "$canonical"
+  mv -f -- "$canonical" "$dest"
+  echo "Updated .devcontainer/dc from $image (previous copy saved as dc.bak)."
+}
+
+SENTINEL_NAME="usage-sentinel"
+SENTINEL_IMAGE="ghcr.io/sadotu/usage-sentinel:latest"
+SENTINEL_NETWORK="agent-services"
+SENTINEL_HEALTH_CMD="node -e 'fetch(\"http://127.0.0.1:4317/health\").then(response => { if (!response.ok) throw new Error(\"health check failed: \" + response.status); })'"
+DC_DOCKER_SOCK="${DC_DOCKER_SOCK:-/var/run/docker.sock}"
+
+docker_sock_gid() {
+  if [ ! -e "$DC_DOCKER_SOCK" ]; then
+    echo "ERROR: $DC_DOCKER_SOCK not found; Sentinel enforcement requires Docker socket access." >&2
+    return 1
+  fi
+  stat -c '%g' "$DC_DOCKER_SOCK"
+}
+
+ensure_sentinel_network() {
+  if docker network inspect "$SENTINEL_NETWORK" >/dev/null 2>&1; then
+    return
+  fi
+  if docker network create "$SENTINEL_NETWORK" >/dev/null 2>&1; then
+    return
+  fi
+  docker network inspect "$SENTINEL_NETWORK" >/dev/null 2>&1 || {
+    echo "ERROR: failed to create or inspect $SENTINEL_NETWORK network." >&2
+    return 1
+  }
+}
+
+sentinel_inspect() {
+  docker container inspect "$SENTINEL_NAME" --format "$1"
+}
+
+sentinel_compatible() {
+  local image restart network env mounts bind_destinations group_add expected_mounts expected_gid health_cmd expected_health health_interval health_timeout health_retries health_start
+  image="$(sentinel_inspect '{{.Config.Image}}')"
+  restart="$(sentinel_inspect '{{.HostConfig.RestartPolicy.Name}}')"
+  network="$(sentinel_inspect '{{range $name, $_ := .NetworkSettings.Networks}}{{$name}}{{"\n"}}{{end}}')"
+  env="$(sentinel_inspect '{{range .Config.Env}}{{println .}}{{end}}')"
+  mounts="$(sentinel_inspect '{{range .Mounts}}{{if eq .Type "volume"}}{{println .Name ":" .Destination}}{{end}}{{end}}' | tr -d ' ')"
+  bind_destinations="$(sentinel_inspect '{{range .Mounts}}{{if eq .Type "bind"}}{{println .Destination}}{{end}}{{end}}')"
+  group_add="$(sentinel_inspect '{{range .HostConfig.GroupAdd}}{{println .}}{{end}}')"
+  health_cmd="$(sentinel_inspect '{{join .Config.Healthcheck.Test "\n"}}')"
+  health_interval="$(sentinel_inspect '{{.Config.Healthcheck.Interval}}')"
+  health_timeout="$(sentinel_inspect '{{.Config.Healthcheck.Timeout}}')"
+  health_retries="$(sentinel_inspect '{{.Config.Healthcheck.Retries}}')"
+  health_start="$(sentinel_inspect '{{.Config.Healthcheck.StartPeriod}}')"
+  expected_mounts="$(printf '%s\n' \
+    'usage-sentinel-claude:/var/lib/usage-sentinel/claude' \
+    'usage-sentinel-codex:/var/lib/usage-sentinel/codex' \
+    'usage-sentinel-data:/var/lib/usage-sentinel/data')"
+  expected_health="$(printf 'CMD-SHELL\n%s' "$SENTINEL_HEALTH_CMD")"
+  expected_gid="$(docker_sock_gid)" || return 1
+
+  [ "$image" = "$SENTINEL_IMAGE" ] &&
+    [ "$restart" = "unless-stopped" ] &&
+    [ "$(sort <<<"$network")" = "$SENTINEL_NETWORK" ] &&
+    [ "$(grep -Ec '^USAGE_SENTINEL_HOST=' <<<"$env")" = 1 ] &&
+    [ "$(grep -Ec '^USAGE_SENTINEL_DATA_DIR=' <<<"$env")" = 1 ] &&
+    [ "$(grep -Ec '^USAGE_SENTINEL_CLAUDE_MANAGED_REFRESH=' <<<"$env")" = 1 ] &&
+    [ "$(grep -Ec '^USAGE_SENTINEL_CODEX_MANAGED_REFRESH=' <<<"$env")" = 1 ] &&
+    [ "$(grep -Ec '^CLAUDE_CONFIG_DIR=' <<<"$env")" = 1 ] &&
+    [ "$(grep -Ec '^CODEX_HOME=' <<<"$env")" = 1 ] &&
+    grep -Fxq 'USAGE_SENTINEL_HOST=0.0.0.0' <<<"$env" &&
+    grep -Fxq 'USAGE_SENTINEL_DATA_DIR=/var/lib/usage-sentinel/data' <<<"$env" &&
+    grep -Fxq 'USAGE_SENTINEL_CLAUDE_MANAGED_REFRESH=true' <<<"$env" &&
+    grep -Fxq 'USAGE_SENTINEL_CODEX_MANAGED_REFRESH=true' <<<"$env" &&
+    grep -Fxq 'CLAUDE_CONFIG_DIR=/var/lib/usage-sentinel/claude' <<<"$env" &&
+    grep -Fxq 'CODEX_HOME=/var/lib/usage-sentinel/codex' <<<"$env" &&
+    [ "$(sort <<<"$mounts")" = "$expected_mounts" ] &&
+    [ "$bind_destinations" = /var/run/docker.sock ] &&
+    [ "$group_add" = "$expected_gid" ] &&
+    [ "$health_cmd" = "$expected_health" ] &&
+    [ "$health_interval" = 30s ] && [ "$health_timeout" = 5s ] &&
+    [ "$health_retries" = 3 ] && [ "$health_start" = 10s ]
+}
+
+wait_for_sentinel() {
+  local status i
+  for i in {1..30}; do
+    status="$(sentinel_inspect '{{if .State.Health}}{{.State.Health.Status}}{{end}}')"
+    case "$status" in
+      healthy) return 0 ;;
+      unhealthy)
+        echo "ERROR: usage-sentinel became unhealthy." >&2
+        return 1
+        ;;
+    esac
+    sleep 2
+  done
+  echo "ERROR: timed out waiting for usage-sentinel health." >&2
+  return 1
+}
+
+create_sentinel() {
+  local gid
+  gid="$(docker_sock_gid)" || return 1
+  docker run -d --name "$SENTINEL_NAME" --restart unless-stopped --network "$SENTINEL_NETWORK" \
+    -e USAGE_SENTINEL_HOST=0.0.0.0 \
+    -e USAGE_SENTINEL_DATA_DIR=/var/lib/usage-sentinel/data \
+    -e USAGE_SENTINEL_CLAUDE_MANAGED_REFRESH=true \
+    -e USAGE_SENTINEL_CODEX_MANAGED_REFRESH=true \
+    -e CLAUDE_CONFIG_DIR=/var/lib/usage-sentinel/claude \
+    -e CODEX_HOME=/var/lib/usage-sentinel/codex \
+    -v usage-sentinel-data:/var/lib/usage-sentinel/data \
+    -v usage-sentinel-claude:/var/lib/usage-sentinel/claude \
+    -v usage-sentinel-codex:/var/lib/usage-sentinel/codex \
+    -v "$DC_DOCKER_SOCK:/var/run/docker.sock" \
+    --group-add "$gid" \
+    --health-cmd "$SENTINEL_HEALTH_CMD" \
+    --health-interval 30s --health-timeout 5s --health-retries 3 --health-start-period 10s \
+    "$SENTINEL_IMAGE" >/dev/null
+}
+
+ensure_sentinel() {
+  local status health
+  ensure_sentinel_network
+  if ! docker container inspect "$SENTINEL_NAME" >/dev/null 2>&1; then
+    docker pull "$SENTINEL_IMAGE"
+    if create_sentinel; then
+      wait_for_sentinel
+      return
+    fi
+    if ! docker container inspect "$SENTINEL_NAME" >/dev/null 2>&1; then
+      echo "ERROR: failed to create usage-sentinel and no competing container appeared." >&2
+      return 1
+    fi
+  fi
+  if ! sentinel_compatible; then
+    echo "ERROR: existing usage-sentinel container is incompatible; inspect and remove it manually before recreating it with the fixed named volumes." >&2
+    return 1
+  fi
+  status="$(sentinel_inspect '{{.State.Status}}')"
+  health="$(sentinel_inspect '{{if .State.Health}}{{.State.Health.Status}}{{end}}')"
+  if [ "$status" = running ]; then
+    case "$health" in
+      healthy) return ;;
+      starting) wait_for_sentinel; return ;;
+      *)
+        echo "ERROR: usage-sentinel is $health; inspect it before continuing." >&2
+        return 1
+        ;;
+    esac
+  fi
+  docker start "$SENTINEL_NAME" >/dev/null
+  wait_for_sentinel
+}
+
+case "$cmd" in
+  up)
+    ensure_sentinel
+    pull_image
+    warn_if_dc_drifted
+    devcontainer up --workspace-folder "$ROOT"
+    ;;
+  rebuild)
+    ensure_sentinel
+    pull_image
+    warn_if_dc_drifted
+    devcontainer up --workspace-folder "$ROOT" --remove-existing-container --build-no-cache
+    ;;
+  self-update)
+    self_update_dc
+    ;;
+  sentinel-update)
+    ensure_sentinel_network
+    if ! docker container inspect "$SENTINEL_NAME" >/dev/null 2>&1; then
+      echo "ERROR: usage-sentinel does not exist; run 'dc up' first." >&2
+      exit 1
+    fi
+    if ! sentinel_compatible; then
+      echo "ERROR: existing usage-sentinel container is incompatible; refusing to replace unknown configuration." >&2
+      exit 1
+    fi
+    docker pull "$SENTINEL_IMAGE"
+    docker rm -f "$SENTINEL_NAME" >/dev/null
+    create_sentinel
+    wait_for_sentinel
+    ;;
+  shell)
+    devcontainer exec --workspace-folder "$ROOT" bash
+    ;;
+  setup)
+    # Recovery path: postCreate runs only once per container create, so a
+    # failed setup (wrong Bitwarden password, network down) would otherwise
+    # force a full rebuild. This re-runs it in place — the script is
+    # idempotent, and `devcontainer exec` attaches an interactive terminal,
+    # which the Bitwarden unlock prompts need.
+    devcontainer exec --workspace-folder "$ROOT" /opt/agent-devcontainer/setup-agents.sh
+    ;;
+  codex-push|codex-pull)
+    # Vault/container work runs inside container, where `bw` and ~/.codex live.
+    # Validated handoff then atomically updates host/global auth.json.
+    sync_codex_auth "${cmd#codex-}" "$@"
+    ;;
+  exec)
+    devcontainer exec --workspace-folder "$ROOT" "$@"
+    ;;
+  down)
+    docker ps -aq --filter "label=$CONTAINER_LABEL" | xargs -r docker rm -f
+    echo "Container removed. Agent config/auth volumes preserved."
+    ;;
+  nuke)
+    docker ps -aq --filter "label=$CONTAINER_LABEL" | xargs -r docker rm -f
+    echo "Container removed. Agent config/auth volumes preserved."
+    ;;
+  wipe-volumes)
+    if [ "${1:-}" != "--yes" ]; then
+      echo "ERROR: wipe-volumes deletes persisted Claude, Codex, GitHub, and shell-history volumes." >&2
+      echo "Re-run as: ./.devcontainer/dc wipe-volumes --yes" >&2
+      exit 1
+    fi
+    docker ps -aq --filter "label=$CONTAINER_LABEL" | xargs -r docker rm -f
+    docker volume rm -f \
+      "$PROJECT_NAME-claude-config" "$PROJECT_NAME-codex-config" \
+      "$PROJECT_NAME-gh-config" "$PROJECT_NAME-github-app-config" \
+      "$PROJECT_NAME-shell-history"
+    echo "Container and persisted agent config/auth volumes deleted. Re-auth required next 'up'."
+    ;;
+  *)
+    grep -E '^#( |$)' "${BASH_SOURCE[0]}" | sed 's/^# \?//'
+    exit 1
+    ;;
+esac
