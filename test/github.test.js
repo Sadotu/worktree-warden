@@ -99,3 +99,32 @@ test('resolveTerminalCandidate is ambiguous when the terminal PR links more than
   assert.equal(result.kind, 'ambiguous');
   assert.match(result.reason, /closes multiple issues/);
 });
+
+test('resolveTerminalCandidate waits when an OPEN PR coexists with an older CLOSED PR (branch reuse)', () => {
+  const result = resolveTerminalCandidate([
+    { number: 12, state: 'OPEN', closingIssuesReferences: [{ number: 4 }] },
+    { number: 3, state: 'CLOSED', closingIssuesReferences: [{ number: 1 }] },
+  ]);
+  assert.deepEqual(result, { kind: 'waiting' });
+});
+
+test('resolveTerminalCandidate waits when an OPEN PR coexists with an older MERGED PR (branch reuse)', () => {
+  const result = resolveTerminalCandidate([
+    { number: 12, state: 'OPEN', closingIssuesReferences: [{ number: 4 }] },
+    { number: 3, state: 'MERGED', closingIssuesReferences: [{ number: 1 }] },
+  ]);
+  assert.deepEqual(result, { kind: 'waiting' });
+});
+
+test('resolveTerminalCandidate dedupes a duplicated closing issue number into a single ready result', () => {
+  const result = resolveTerminalCandidate([{ number: 5, state: 'MERGED', closingIssuesReferences: [{ number: 5 }, { number: 5 }] }]);
+  assert.deepEqual(result, { kind: 'ready', number: 5, state: 'MERGED', issue: 5 });
+});
+
+test('resolveTerminalCandidate distinguishes a missing closingIssuesReferences field from an empty array', () => {
+  const pr = { number: 5, state: 'MERGED' };
+  delete pr.closingIssuesReferences;
+  const result = resolveTerminalCandidate([pr]);
+  assert.equal(result.kind, 'ambiguous');
+  assert.match(result.reason, /is missing closingIssuesReferences/);
+});

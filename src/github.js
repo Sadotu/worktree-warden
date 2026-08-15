@@ -28,6 +28,9 @@ export function findPullRequestsForBranch(repoSlug, branch, token, opts = {}) {
 }
 
 export function resolveTerminalCandidate(rows) {
+  if (rows.some((row) => row.state === 'OPEN')) {
+    return { kind: 'waiting' };
+  }
   const terminal = rows.filter((row) => TERMINAL_STATES.has(row.state));
   if (terminal.length === 0) {
     return { kind: 'waiting' };
@@ -37,13 +40,18 @@ export function resolveTerminalCandidate(rows) {
     return { kind: 'ambiguous', reason: `multiple terminal PRs for this branch: ${summary}` };
   }
   const pr = terminal[0];
-  const issues = pr.closingIssuesReferences ?? [];
-  if (issues.length === 0) {
-    return { kind: 'ambiguous', reason: `PR #${pr.number} has no linked closing issue` };
+  const hasField = 'closingIssuesReferences' in pr;
+  const rawIssues = pr.closingIssuesReferences ?? [];
+  const issueNumbers = [...new Set(rawIssues.map((issue) => issue.number))];
+  if (issueNumbers.length === 0) {
+    const reason = hasField
+      ? `PR #${pr.number} has no linked closing issue`
+      : `PR #${pr.number} response is missing closingIssuesReferences`;
+    return { kind: 'ambiguous', reason };
   }
-  if (issues.length > 1) {
-    const summary = issues.map((issue) => `#${issue.number}`).join(', ');
+  if (issueNumbers.length > 1) {
+    const summary = issueNumbers.map((number) => `#${number}`).join(', ');
     return { kind: 'ambiguous', reason: `PR #${pr.number} closes multiple issues: ${summary}` };
   }
-  return { kind: 'ready', number: pr.number, state: pr.state, issue: issues[0].number };
+  return { kind: 'ready', number: pr.number, state: pr.state, issue: issueNumbers[0] };
 }
