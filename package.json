@@ -1,0 +1,25 @@
+{
+  "name": "@nickysagan/worktree-warden",
+  "version": "0.1.0",
+  "description": "Watches merged agent pull requests and invokes the canonical Phase 7 cleanup for local worktrees.",
+  "type": "module",
+  "bin": {
+    "worktree-warden": "bin/worktree-warden.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "test": "node --test"
+  },
+  "files": [
+    "bin",
+    "src",
+    "README.md"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Sadotu/worktree-warden.git"
+  }
+}
