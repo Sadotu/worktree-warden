@@ -1,11 +1,9 @@
 import { resolvePrimaryWorkspace, resolveRepoSlug, resolveStateDir, resolveCleanupScriptPath } from './repo.js';
 import { discoverAgentWorktrees } from './discovery.js';
 import { mintToken, findPullRequestForBranch } from './github.js';
-import { runCleanup, classifyAfterRetries } from './cleanup.js';
-import { loadStore, saveStore, getBranchState, setBranchState, clearBranchState } from './store.js';
+import { invokeCleanup } from './cleanup.js';
+import { loadStore, saveStore, getCandidate, setPending, setAttention, clearCandidate } from './store.js';
 import { appendLog } from './log.js';
-
-const DEFAULT_MAX_RETRIES = 5;
 
 export function runOnce(options = {}) {
   const cwd = options.cwd ?? process.cwd();
@@ -13,35 +11,52 @@ export function runOnce(options = {}) {
   const repoSlug = options.repoSlug ?? resolveRepoSlug(cwd);
   const stateDir = options.stateDir ?? resolveStateDir(cwd);
   const cleanupScript = options.cleanupScript ?? resolveCleanupScriptPath(primaryWorkspace);
-  const maxRetries = options.maxRetries ?? (Number(process.env.WARDEN_MAX_CONSECUTIVE_RETRIES) || DEFAULT_MAX_RETRIES);
   const discover = options.discover ?? (() => discoverAgentWorktrees(primaryWorkspace));
   const mint = options.mint ?? (() => mintToken(repoSlug));
   const findPR = options.findPR ?? ((branch, token) => findPullRequestForBranch(repoSlug, branch, token));
-  const cleanup = options.cleanup ?? ((pr, issue) => runCleanup(cleanupScript, pr, issue));
+  const cleanup = options.cleanup ?? ((pr, issue) => invokeCleanup(cleanupScript, pr, issue));
   const log = options.log ?? ((level, message) => appendLog(stateDir, level, message));
 
   let store = loadStore(stateDir);
-  const worktrees = discover();
-  const seen = new Set();
 
+  const resolveCandidate = (branch, pr, issue) => {
+    const result = cleanup(pr, issue);
+    if (result.status === 'cleaned' || result.status === 'already-clean') {
+      log('info', `${branch}: ${result.status} (pr #${pr}): ${result.reason ?? ''}`.trim());
+      store = clearCandidate(store, branch);
+    } else {
+      log(
+        'error',
+        `${branch}: ${result.status} (pr #${pr}): ${result.reason ?? ''} ${result.diagnostic ?? ''}`.trim()
+      );
+      store = setAttention(store, branch, {
+        pr, issue, status: result.status, reason: result.reason, diagnostic: result.diagnostic,
+      });
+    }
+    saveStore(stateDir, store);
+  };
+
+  // Pass 1: resume any candidate still pending from an interrupted run,
+  // regardless of whether its worktree is still discoverable — dropping it
+  // here just because discovery can't see it anymore is exactly the data
+  // loss this pass exists to prevent.
+  for (const branch of Object.keys(store)) {
+    const candidate = store[branch];
+    if (candidate.status !== 'pending') continue;
+    resolveCandidate(branch, candidate.pr, candidate.issue);
+  }
+
+  // Pass 2: discover newly terminal candidates among currently-visible
+  // agent worktrees that have no store entry yet.
+  const worktrees = discover();
   for (const wt of worktrees) {
-    seen.add(wt.branch);
-    const branchState = getBranchState(store, wt.branch);
-    if (branchState.outcome === 'blocked' || branchState.outcome === 'cleaned') continue;
+    if (getCandidate(store, wt.branch)) continue; // pending (Pass 1 handled it) or has an attention item (no auto-retry)
 
     let token;
     try {
       token = mint();
     } catch (err) {
-      const newRetryCount = branchState.retryKind === 'connectivity' ? branchState.retryCount + 1 : 1;
-      const outcome = classifyAfterRetries('retry', newRetryCount, maxRetries);
-      log(outcome === 'blocked' ? 'error' : 'warn', `${wt.branch}: token mint failed: ${err.message}`);
-      store = setBranchState(store, wt.branch, {
-        outcome,
-        retryCount: newRetryCount,
-        retryKind: 'connectivity',
-        attention: outcome === 'blocked',
-      });
+      log('warn', `${wt.branch}: token mint failed, will retry next cycle: ${err.message}`);
       continue;
     }
 
@@ -49,58 +64,17 @@ export function runOnce(options = {}) {
     try {
       pr = findPR(wt.branch, token);
     } catch (err) {
-      const newRetryCount = branchState.retryKind === 'connectivity' ? branchState.retryCount + 1 : 1;
-      const outcome = classifyAfterRetries('retry', newRetryCount, maxRetries);
-      log(outcome === 'blocked' ? 'error' : 'warn', `${wt.branch}: PR lookup failed: ${err.message}`);
-      store = setBranchState(store, wt.branch, {
-        outcome,
-        retryCount: newRetryCount,
-        retryKind: 'connectivity',
-        attention: outcome === 'blocked',
-      });
+      log('warn', `${wt.branch}: PR lookup failed, will retry next cycle: ${err.message}`);
       continue;
     }
 
-    if (!pr || pr.state === 'OPEN') {
-      store = setBranchState(store, wt.branch, { outcome: 'waiting', retryCount: 0 });
-      continue;
-    }
-    if (pr.state === 'CLOSED') {
-      store = clearBranchState(store, wt.branch);
-      continue;
-    }
+    if (!pr || pr.state === 'OPEN') continue;
 
-    // MERGED
-    const result = cleanup(pr.number, wt.issueNumber);
-    if (result.outcome === 'cleaned') {
-      log('info', `${wt.branch}: cleaned (pr #${pr.number})`);
-      store = clearBranchState(store, wt.branch);
-      continue;
-    }
-    const nextRetryCount = branchState.retryKind === 'cleanup' ? branchState.retryCount + 1 : 1;
-    const finalOutcome = classifyAfterRetries(result.outcome, nextRetryCount, maxRetries);
-    log(
-      finalOutcome === 'blocked' ? 'error' : 'warn',
-      `${wt.branch}: ${finalOutcome} (pr #${pr.number}): ${result.stderr.trim()}`
-    );
-    store = setBranchState(store, wt.branch, {
-      outcome: finalOutcome,
-      retryCount: nextRetryCount,
-      retryKind: 'cleanup',
-      attention: finalOutcome === 'blocked',
-    });
+    store = setPending(store, wt.branch, { pr: pr.number, issue: wt.issueNumber });
+    saveStore(stateDir, store);
+    resolveCandidate(wt.branch, pr.number, wt.issueNumber);
   }
 
-  for (const branch of Object.keys(store)) {
-    if (seen.has(branch)) continue;
-    const priorState = getBranchState(store, branch);
-    if (priorState.outcome === 'retry' || priorState.outcome === 'blocked') {
-      log('warn', `${branch}: disappeared from discovery while outcome was '${priorState.outcome}' — verify main/issue manually`);
-    }
-    store = clearBranchState(store, branch);
-  }
-
-  saveStore(stateDir, store);
   return store;
 }
 

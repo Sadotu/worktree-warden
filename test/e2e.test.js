@@ -36,7 +36,7 @@ test('end-to-end: real worktree discovery feeds runOnce, which cleans a merged b
       cleanupCalls += 1;
       assert.equal(pr, 99);
       assert.equal(issue, 7);
-      return { outcome: 'cleaned', stderr: '' };
+      return { status: 'cleaned', pr: '99', issue: '7', branch: 'agent/7-e2e-demo', merge_mode: 'regular', reason: 'cleanup-complete', diagnostic: '' };
     },
     log: () => {},
   });
