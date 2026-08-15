@@ -19,18 +19,31 @@ export function saveStore(stateDir, store) {
   fs.renameSync(tmp, file);
 }
 
-export function getBranchState(store, branch) {
-  return store[branch] ?? { outcome: null, retryCount: 0, retryKind: null, attention: false, updatedAt: null };
+export function getCandidate(store, branch) {
+  return store[branch] ?? null;
 }
 
-export function setBranchState(store, branch, patch) {
+export function setPending(store, branch, { pr, issue }) {
   return {
     ...store,
-    [branch]: { ...getBranchState(store, branch), ...patch, updatedAt: new Date().toISOString() },
+    [branch]: {
+      branch, pr, issue, status: 'pending', reason: null, diagnostic: null,
+      updatedAt: new Date().toISOString(),
+    },
   };
 }
 
-export function clearBranchState(store, branch) {
+export function setAttention(store, branch, { pr, issue, status, reason, diagnostic }) {
+  return {
+    ...store,
+    [branch]: {
+      branch, pr, issue, status, reason: reason ?? null, diagnostic: diagnostic ?? null,
+      updatedAt: new Date().toISOString(),
+    },
+  };
+}
+
+export function clearCandidate(store, branch) {
   const next = { ...store };
   delete next[branch];
   return next;
