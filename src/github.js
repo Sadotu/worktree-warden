@@ -17,7 +17,7 @@ export function findPullRequestForBranch(repoSlug, branch, token, opts = {}) {
   const run = opts.run ?? defaultRun;
   const result = run(
     'gh',
-    ['pr', 'list', '--repo', repoSlug, '--head', branch, '--state', 'all', '--json', 'number,state', '--limit', '1'],
+    ['pr', 'list', '--repo', repoSlug, '--head', branch, '--state', 'all', '--json', 'number,state', '--limit', '20'],
     { env: { ...process.env, GH_TOKEN: token } }
   );
   if (result.status !== 0) {
@@ -25,6 +25,10 @@ export function findPullRequestForBranch(repoSlug, branch, token, opts = {}) {
   }
   const rows = JSON.parse(result.stdout || '[]');
   if (rows.length === 0) return null;
-  const { number, state } = rows[0];
-  return { number, state };
+  const open = rows.find((row) => row.state === 'OPEN');
+  if (open) return { number: open.number, state: open.state };
+  const merged = rows.find((row) => row.state === 'MERGED');
+  if (merged) return { number: merged.number, state: merged.state };
+  const newestClosed = rows.reduce((a, b) => (b.number > a.number ? b : a));
+  return { number: newestClosed.number, state: newestClosed.state };
 }

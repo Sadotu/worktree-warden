@@ -33,7 +33,7 @@ test('findPullRequestForBranch returns the first matching PR', () => {
     assert.equal(cmd, 'gh');
     assert.deepEqual(args, [
       'pr', 'list', '--repo', 'Sadotu/worktree-warden', '--head', 'agent/1-demo',
-      '--state', 'all', '--json', 'number,state', '--limit', '1',
+      '--state', 'all', '--json', 'number,state', '--limit', '20',
     ]);
     assert.equal(options.env.GH_TOKEN, 'ghs_faketoken');
     return { status: 0, stdout: '[{"number":2,"state":"MERGED"}]', stderr: '' };
@@ -46,6 +46,47 @@ test('findPullRequestForBranch returns null when no PR exists', () => {
   const run = () => ({ status: 0, stdout: '[]', stderr: '' });
   const pr = findPullRequestForBranch('Sadotu/worktree-warden', 'agent/1-demo', 'ghs_faketoken', { run });
   assert.equal(pr, null);
+});
+
+test('findPullRequestForBranch prefers an OPEN PR even when not first', () => {
+  const run = () => ({
+    status: 0,
+    stdout: JSON.stringify([
+      { number: 3, state: 'CLOSED' },
+      { number: 5, state: 'OPEN' },
+      { number: 1, state: 'CLOSED' },
+    ]),
+    stderr: '',
+  });
+  const pr = findPullRequestForBranch('Sadotu/worktree-warden', 'agent/1-demo', 'ghs_faketoken', { run });
+  assert.deepEqual(pr, { number: 5, state: 'OPEN' });
+});
+
+test('findPullRequestForBranch prefers a MERGED PR when no OPEN PR exists', () => {
+  const run = () => ({
+    status: 0,
+    stdout: JSON.stringify([
+      { number: 2, state: 'CLOSED' },
+      { number: 4, state: 'MERGED' },
+    ]),
+    stderr: '',
+  });
+  const pr = findPullRequestForBranch('Sadotu/worktree-warden', 'agent/1-demo', 'ghs_faketoken', { run });
+  assert.deepEqual(pr, { number: 4, state: 'MERGED' });
+});
+
+test('findPullRequestForBranch returns the highest-numbered CLOSED PR when only CLOSED PRs exist', () => {
+  const run = () => ({
+    status: 0,
+    stdout: JSON.stringify([
+      { number: 2, state: 'CLOSED' },
+      { number: 7, state: 'CLOSED' },
+      { number: 4, state: 'CLOSED' },
+    ]),
+    stderr: '',
+  });
+  const pr = findPullRequestForBranch('Sadotu/worktree-warden', 'agent/1-demo', 'ghs_faketoken', { run });
+  assert.deepEqual(pr, { number: 7, state: 'CLOSED' });
 });
 
 test('findPullRequestForBranch throws on gh failure', () => {
