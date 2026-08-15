@@ -1,24 +1,118 @@
 name: Publish
 
+# Two entrypoints, one behaviour: whatever `package.json` declares is
+# released unless the registry already carries it. A merge to main is
+# enough — tagging by hand is a step that can be forgotten, leaving a
+# merged fix unreleased while every installed daemon keeps running old
+# code.
 on:
   push:
+    branches: [main]
     tags:
-      - 'v*'
+      - "v*"
+
+# npm versions are immutable, so two releases must never be in flight at
+# once: the loser would race the tag or duplicate the publish. Queued,
+# never cancelled — a cancelled release is a half-finished one.
+concurrency:
+  group: publish
+  cancel-in-progress: false
+
+permissions:
+  contents: read
 
 jobs:
   publish:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      # Trusted publishing: npm exchanges this OIDC token for a
+      # short-lived credential, so there is no npm token to store,
+      # rotate, or leak.
       id-token: write
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+      needed: ${{ steps.release.outputs.needed }}
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
-          registry-url: 'https://registry.npmjs.org'
-      - run: npm ci
-      - run: npm test
-      - run: npm publish --provenance --access public
+          node-version: "22"
+          registry-url: https://registry.npmjs.org
+
+      # Only meaningful for the tag entrypoint: a push to main carries no
+      # tag that could disagree with the manifest.
+      - name: Verify the tag matches the declared version
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          declared="v$(node -p "require('./package.json').version")"
+          if [ "$declared" != "$GITHUB_REF_NAME" ]; then
+            echo "tag $GITHUB_REF_NAME does not match package.json version $declared" >&2
+            exit 1
+          fi
+
+      # The setup-node runner's bundled npm predates trusted publishing
+      # and would look for a token that no longer exists. Trusted
+      # publishing needs npm >= 11.5.1.
+      - name: Use an npm that supports trusted publishing
+        run: npm install -g npm@latest
+
+      # Every merge reaches this workflow, but most merges do not bump
+      # the version. Asking the registry rather than assuming also makes
+      # a re-run of an already-released commit a no-op instead of a
+      # failure.
+      - name: Decide whether this version still needs releasing
+        id: release
+        run: |
+          name="$(node -p "require('./package.json').name")"
+          version="$(node -p "require('./package.json').version")"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          existing="$(npm view "$name@$version" version 2>/dev/null || true)"
+          if [ -n "$existing" ]; then
+            echo "needed=false" >> "$GITHUB_OUTPUT"
+            echo "$name@$version is already published — nothing to release"
+          else
+            echo "needed=true" >> "$GITHUB_OUTPUT"
+            echo "$name@$version is not on the registry — releasing"
+          fi
+
+      - name: Run the test suite
+        if: steps.release.outputs.needed == 'true'
+        run: npm test
+
+      # `access: public` lives in package.json's publishConfig — a
+      # scoped package would otherwise attempt a private publish and
+      # fail.
+      - name: Publish to npmjs
+        if: steps.release.outputs.needed == 'true'
+        run: npm publish
+
+  # A separate job purely to split privilege: the job that can push to
+  # this repository never holds an npm credential, and the job that
+  # holds an npm credential can never push here.
+  tag:
+    needs: publish
+    if: needs.publish.outputs.needed == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      # Tags are bookkeeping, applied after the release they describe
+      # exists. Pushed with GITHUB_TOKEN, which by design does not
+      # re-trigger this workflow, so the tag entrypoint cannot loop.
+      - name: Tag the released commit
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          VERSION: ${{ needs.publish.outputs.version }}
+        run: |
+          tag="v$VERSION"
+          if git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null 2>&1; then
+            echo "$tag already exists — leaving it alone"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$tag" -m "$tag"
+          git push origin "$tag"

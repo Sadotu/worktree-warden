@@ -92,7 +92,9 @@ delete, it holds no in-flight work.
 
 ## Releasing
 
-1. Bump `version` in `package.json`.
-2. `git tag vX.Y.Z && git push origin vX.Y.Z`.
-3. `.github/workflows/publish.yml` tests and publishes via the `NPM_TOKEN`
-   secret.
+Bump `version` in `package.json` and merge to `main`.
+`.github/workflows/publish.yml` checks whether that version is already on
+the npm registry; if not, it runs the test suite, publishes via npm's
+trusted publishing (OIDC — no stored npm token), and tags the released
+commit itself. Re-running the workflow on an already-released version, or
+pushing a `v*` tag by hand, is a no-op.
