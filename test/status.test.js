@@ -6,6 +6,7 @@ import path from 'node:path';
 import { renderStatus } from '../src/status.js';
 import { saveStore } from '../src/store.js';
 import { appendLog } from '../src/log.js';
+import { DAEMON_ERROR_KEY } from '../src/daemon.js';
 
 function tmpDir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'warden-status-'));
@@ -30,4 +31,15 @@ test('renderStatus lists a pending candidate and a blocked attention item, count
   assert.match(report, /agent\/2-demo: blocked/);
   assert.match(report, /attention items: 1/);
   assert.match(report, /worktree-dirty/);
+});
+
+test('renderStatus renders a DAEMON_ERROR_KEY entry as a distinct daemon-error line and counts it as an attention item', () => {
+  const dir = tmpDir();
+  saveStore(dir, {
+    [DAEMON_ERROR_KEY]: { branch: DAEMON_ERROR_KEY, pr: null, issue: null, status: 'retry', reason: 'runOnce-failed', diagnostic: 'boom', updatedAt: '2026-08-15T00:00:00.000Z' },
+  });
+  const report = renderStatus(dir);
+  assert.match(report, /daemon error: retry \(reason=runOnce-failed.*boom/);
+  assert.doesNotMatch(report, new RegExp(`${DAEMON_ERROR_KEY}: retry \\(pr #`));
+  assert.match(report, /attention items: 1/);
 });

@@ -49,8 +49,10 @@ Each poll cycle:
    even if its worktree is no longer visible — by invoking Phase 7 for it
    again. `cleanup-merged.sh`'s own journal makes this converge safely.
 2. Discover local `agent/<issue>-<slug>` worktrees with no tracked
-   candidate yet. For each: resolve its PR. An `OPEN` PR (or no PR at all)
-   is left alone — nothing is written, the next poll checks again for free.
+   candidate yet. For each: resolve its PR and, once terminal, its
+   GitHub-linked closing issue — never inferred from the branch name. An
+   `OPEN` PR (or no PR at all) is left alone — nothing is written, the next
+   poll checks again for free.
 3. Once a PR reaches a terminal GitHub state (`MERGED` or `CLOSED`), the
    candidate (`pr`, `issue`, `branch`) is persisted *before* invoking Phase
    7, so a crash mid-invocation can't lose track of it.
@@ -58,7 +60,12 @@ Each poll cycle:
    `cleaned`/`already-clean` clears the candidate. Anything else
    (`waiting`, `blocked`, `retry`, or the invocation itself failing to
    produce a parseable record) records a permanent attention item — the
-   daemon never automatically retries it.
+   daemon never automatically retries it. Any failure anywhere in this
+   process — minting a token, looking up a PR, an ambiguous PR/issue
+   relationship (more than one terminal PR for a branch, or a PR with no
+   or multiple linked closing issues), or Phase 7 itself — writes a
+   permanent attention item immediately. None of it is retried
+   automatically.
 
 ## Configuration
 
@@ -99,6 +106,12 @@ work with no way to rediscover it if its worktree is already gone;
 deleting the whole file discards every other tracked candidate along
 with it. Setting `status` back to `"pending"` is the only recovery path
 that is safe for both a pending candidate and an attention item.
+
+A whole-cycle failure not tied to any specific branch (e.g. the daemon
+can't resolve the repository at all) is recorded under the reserved
+state.json key `__runOnce__` and shown in `status` as `daemon error: ...`.
+Unlike a branch entry, this key holds no in-flight Phase 7 work, so it is
+always safe to delete outright rather than editing its status.
 
 ## Releasing
 
