@@ -20,7 +20,7 @@ export function saveStore(stateDir, store) {
 }
 
 export function getBranchState(store, branch) {
-  return store[branch] ?? { outcome: null, retryCount: 0, attention: false, updatedAt: null };
+  return store[branch] ?? { outcome: null, retryCount: 0, retryKind: null, attention: false, updatedAt: null };
 }
 
 export function setBranchState(store, branch, patch) {

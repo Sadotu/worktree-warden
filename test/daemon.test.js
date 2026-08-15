@@ -162,6 +162,97 @@ test('runOnce is idempotent across restarts: a branch that disappears from disco
   assert.equal(cleanupCalls, 1, 'cleanup must not run a second time for an already-cleaned branch');
 });
 
+test('runOnce escalates persistent token-mint (connectivity) failures to blocked after maxRetries cycles', () => {
+  const dir = tmpDir();
+  let mintCalls = 0;
+  const options = () => baseOptions({
+    stateDir: dir,
+    discover: () => [{ path: '/wt/1', branch: 'agent/1-demo', issueNumber: 1, slug: 'demo' }],
+    mint: () => { mintCalls += 1; throw new Error('token mint failed'); },
+    findPR: () => { throw new Error('findPR should not be called'); },
+    cleanup: () => { throw new Error('cleanup should not be called'); },
+    log: () => {},
+    maxRetries: 3,
+  });
+  let store;
+  for (let i = 0; i < 3; i++) store = runOnce(options());
+  assert.equal(store['agent/1-demo'].outcome, 'blocked');
+  assert.equal(store['agent/1-demo'].attention, true);
+  assert.equal(mintCalls, 3);
+  // Once blocked, the branch is skipped entirely — mint should not be called again.
+  store = runOnce(options());
+  assert.equal(mintCalls, 3, 'mint must not be invoked again once blocked');
+});
+
+test('runOnce does not pre-charge cleanup retries with prior connectivity-failure retries', () => {
+  const dir = tmpDir();
+  const options = (overrides) => baseOptions({
+    stateDir: dir,
+    discover: () => [{ path: '/wt/1', branch: 'agent/1-demo', issueNumber: 1, slug: 'demo' }],
+    log: () => {},
+    maxRetries: 5,
+    ...overrides,
+  });
+
+  // Build up connectivity-failure retryCount over a few cycles.
+  let store;
+  for (let i = 0; i < 3; i++) {
+    store = runOnce(options({
+      mint: () => { throw new Error('token mint failed'); },
+      findPR: () => { throw new Error('findPR should not be called'); },
+      cleanup: () => { throw new Error('cleanup should not be called'); },
+    }));
+  }
+  assert.equal(store['agent/1-demo'].outcome, 'retry');
+  assert.equal(store['agent/1-demo'].retryKind, 'connectivity');
+  assert.equal(store['agent/1-demo'].retryCount, 3);
+
+  // Now the PR merges and cleanup itself returns a single retry — the
+  // cleanup retryCount must reset to 1, not continue from 3.
+  store = runOnce(options({
+    mint: () => 'tok',
+    findPR: () => ({ number: 5, state: 'MERGED' }),
+    cleanup: () => ({ outcome: 'retry', stderr: '' }),
+  }));
+  assert.equal(store['agent/1-demo'].outcome, 'retry');
+  assert.equal(store['agent/1-demo'].retryKind, 'cleanup');
+  assert.equal(store['agent/1-demo'].retryCount, 1);
+});
+
+test('runOnce logs a warning when a branch in retry/blocked state disappears from discovery', () => {
+  const dir = tmpDir();
+  const logs = [];
+  const worktrees = [{ path: '/wt/1', branch: 'agent/1-demo', issueNumber: 1, slug: 'demo' }];
+
+  // First cycle: leave the branch in 'retry' state (cleanup keeps failing).
+  runOnce(baseOptions({
+    stateDir: dir,
+    discover: () => worktrees,
+    mint: () => 'tok',
+    findPR: () => ({ number: 5, state: 'MERGED' }),
+    cleanup: () => ({ outcome: 'retry', stderr: '' }),
+    log: (level, message) => logs.push({ level, message }),
+    maxRetries: 5,
+  }));
+
+  // Second cycle: the branch/worktree has vanished entirely.
+  const store = runOnce(baseOptions({
+    stateDir: dir,
+    discover: () => [],
+    mint: () => 'tok',
+    findPR: () => { throw new Error('should not be called'); },
+    cleanup: () => { throw new Error('should not be called'); },
+    log: (level, message) => logs.push({ level, message }),
+    maxRetries: 5,
+  }));
+
+  assert.equal(store['agent/1-demo'], undefined);
+  assert.ok(
+    logs.some((l) => l.message.includes('disappeared') && l.message.includes('agent/1-demo')),
+    'expected a warning log mentioning the disappeared branch'
+  );
+});
+
 test('loop calls runOnce immediately and again after intervalMs, and stop() halts it', async () => {
   let calls = 0;
   const stop = loop({
