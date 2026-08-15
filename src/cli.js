@@ -1,4 +1,4 @@
-import { resolveStateDir } from './repo.js';
+import { resolveStateDir, resolvePrimaryWorkspace } from './repo.js';
 import { acquireLock, releaseLock } from './lock.js';
 import { loop } from './daemon.js';
 import { renderStatus } from './status.js';
@@ -18,9 +18,12 @@ export function main(argv, { cwd = process.cwd(), stateDirOverride } = {}) {
     return 1;
   }
 
+  const primaryWorkspace = resolvePrimaryWorkspace(cwd);
+  process.chdir(primaryWorkspace);
+
   acquireLock(stateDir);
   appendLog(stateDir, 'info', 'worktree-warden started');
-  const stop = loop({ cwd, stateDir });
+  const stop = loop({ cwd: primaryWorkspace, stateDir });
 
   const shutdown = (signal) => {
     appendLog(stateDir, 'info', `worktree-warden stopping (${signal})`);
