@@ -84,10 +84,21 @@ Everything durable lives under `<git-common-dir>/worktree-warden/`:
 
 `worktree-warden` never automatically retries a candidate once an
 attention item is recorded for it — that is a deliberate design choice,
-not a bug. To retry after fixing the underlying problem (e.g. committing or
-stashing a dirty worktree, resolving a diverged `main`), remove that
-branch's entry from `state.json` (or delete the whole file to reset every
-candidate). The next poll rediscovers the branch from scratch.
+not a bug. To retry after fixing the underlying problem (e.g. committing
+or stashing a dirty worktree, resolving a diverged `main`), edit that
+branch's entry in `state.json` and set its `"status"` field back to
+`"pending"` — leave `pr`, `issue`, and `branch` as they are. The next
+poll's resume pass invokes Phase 7 for it again. This works even if the
+worktree Phase 7 was cleaning up has already been removed, since
+resuming a pending candidate does not depend on discovery finding a
+worktree for it again.
+
+Do not delete a candidate's entry to "reset" it, and do not delete the
+whole `state.json` file. Deleting a `pending` entry can abandon in-flight
+work with no way to rediscover it if its worktree is already gone;
+deleting the whole file discards every other tracked candidate along
+with it. Setting `status` back to `"pending"` is the only recovery path
+that is safe for both a pending candidate and an attention item.
 
 ## Releasing
 
