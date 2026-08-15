@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { runOnce, loop } from '../src/daemon.js';
-import { loadStore } from '../src/store.js';
+import { loadStore, saveStore } from '../src/store.js';
 
 function tmpDir() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'warden-daemon-'));
@@ -16,37 +16,23 @@ function baseOptions(overrides = {}) {
     primaryWorkspace: '/fake/workspace',
     repoSlug: 'Sadotu/worktree-warden',
     cleanupScript: '/fake/cleanup-merged.sh',
-    maxRetries: 3,
     ...overrides,
   };
 }
 
-test('runOnce marks an open PR as waiting and never invokes cleanup', () => {
-  const cleanup = () => { throw new Error('cleanup should not be called'); };
+test('runOnce does nothing for an open PR — no store entry written', () => {
   const options = baseOptions({
     discover: () => [{ path: '/wt/1', branch: 'agent/1-demo', issueNumber: 1, slug: 'demo' }],
     mint: () => 'tok',
     findPR: () => ({ number: 5, state: 'OPEN' }),
-    cleanup,
-    log: () => {},
-  });
-  const store = runOnce(options);
-  assert.equal(store['agent/1-demo'].outcome, 'waiting');
-});
-
-test('runOnce ignores a closed-unmerged PR (no stored state)', () => {
-  const options = baseOptions({
-    discover: () => [{ path: '/wt/1', branch: 'agent/1-demo', issueNumber: 1, slug: 'demo' }],
-    mint: () => 'tok',
-    findPR: () => ({ number: 5, state: 'CLOSED' }),
     cleanup: () => { throw new Error('cleanup should not be called'); },
     log: () => {},
   });
   const store = runOnce(options);
-  assert.equal(store['agent/1-demo'], undefined);
+  assert.deepEqual(store, {});
 });
 
-test('runOnce ignores branches with no PR at all', () => {
+test('runOnce does nothing when no PR exists yet', () => {
   const options = baseOptions({
     discover: () => [{ path: '/wt/1', branch: 'agent/1-demo', issueNumber: 1, slug: 'demo' }],
     mint: () => 'tok',
@@ -55,202 +41,153 @@ test('runOnce ignores branches with no PR at all', () => {
     log: () => {},
   });
   const store = runOnce(options);
-  assert.equal(store['agent/1-demo'].outcome, 'waiting');
+  assert.deepEqual(store, {});
 });
 
-test('runOnce records a retry on token mint failure and never calls findPR/cleanup', () => {
+test('runOnce persists a pending candidate before invoking cleanup for a merged PR', () => {
   const options = baseOptions({
     discover: () => [{ path: '/wt/1', branch: 'agent/1-demo', issueNumber: 1, slug: 'demo' }],
-    mint: () => { throw new Error('token mint failed'); },
-    findPR: () => { throw new Error('findPR should not be called'); },
-    cleanup: () => { throw new Error('cleanup should not be called'); },
+    mint: () => 'tok',
+    findPR: () => ({ number: 5, state: 'MERGED' }),
+    cleanup: (pr, issue) => {
+      const persistedBeforeInvoking = loadStore(options.stateDir)['agent/1-demo'];
+      assert.equal(persistedBeforeInvoking.status, 'pending');
+      assert.equal(persistedBeforeInvoking.pr, 5);
+      assert.equal(pr, 5);
+      assert.equal(issue, 1);
+      return { status: 'cleaned', pr: '5', issue: '1', branch: 'agent/1-demo', merge_mode: 'regular', reason: 'cleanup-complete', diagnostic: '' };
+    },
     log: () => {},
   });
   const store = runOnce(options);
-  assert.equal(store['agent/1-demo'].outcome, 'retry');
-  assert.equal(store['agent/1-demo'].retryCount, 1);
+  assert.equal(store['agent/1-demo'], undefined);
 });
 
-test('runOnce records a retry on PR lookup failure and never calls cleanup', () => {
+test('runOnce also invokes cleanup for a closed, unmerged PR', () => {
+  let cleanupCalls = 0;
+  const options = baseOptions({
+    discover: () => [{ path: '/wt/1', branch: 'agent/1-demo', issueNumber: 1, slug: 'demo' }],
+    mint: () => 'tok',
+    findPR: () => ({ number: 5, state: 'CLOSED' }),
+    cleanup: (pr, issue) => {
+      cleanupCalls += 1;
+      assert.equal(pr, 5);
+      assert.equal(issue, 1);
+      return { status: 'cleaned', pr: '5', issue: '1', branch: 'agent/1-demo', merge_mode: null, reason: 'closed-unmerged-cleanup-complete', diagnostic: '' };
+    },
+    log: () => {},
+  });
+  const store = runOnce(options);
+  assert.equal(cleanupCalls, 1);
+  assert.equal(store['agent/1-demo'], undefined);
+});
+
+test('runOnce clears the candidate on already-clean', () => {
+  const options = baseOptions({
+    discover: () => [{ path: '/wt/1', branch: 'agent/1-demo', issueNumber: 1, slug: 'demo' }],
+    mint: () => 'tok',
+    findPR: () => ({ number: 5, state: 'MERGED' }),
+    cleanup: () => ({ status: 'already-clean', pr: '5', issue: '1', branch: 'agent/1-demo', merge_mode: null, reason: 'nothing-to-clean', diagnostic: '' }),
+    log: () => {},
+  });
+  const store = runOnce(options);
+  assert.equal(store['agent/1-demo'], undefined);
+});
+
+test('runOnce records an attention item on blocked, with no retry bookkeeping at all', () => {
+  const options = baseOptions({
+    discover: () => [{ path: '/wt/1', branch: 'agent/1-demo', issueNumber: 1, slug: 'demo' }],
+    mint: () => 'tok',
+    findPR: () => ({ number: 5, state: 'MERGED' }),
+    cleanup: () => ({ status: 'blocked', pr: '5', issue: '1', branch: 'agent/1-demo', merge_mode: null, reason: 'worktree-dirty', diagnostic: 'uncommitted changes' }),
+    log: () => {},
+  });
+  const store = runOnce(options);
+  assert.equal(store['agent/1-demo'].status, 'blocked');
+  assert.equal(store['agent/1-demo'].reason, 'worktree-dirty');
+  assert.equal(store['agent/1-demo'].diagnostic, 'uncommitted changes');
+  assert.equal('retryCount' in store['agent/1-demo'], false);
+  assert.equal('attention' in store['agent/1-demo'], false);
+});
+
+test('runOnce never re-invokes cleanup for a branch that already has an attention item', () => {
+  const dir = tmpDir();
+  let cleanupCalls = 0;
+  const opts = () => baseOptions({
+    stateDir: dir,
+    discover: () => [{ path: '/wt/1', branch: 'agent/1-demo', issueNumber: 1, slug: 'demo' }],
+    mint: () => 'tok',
+    findPR: () => ({ number: 5, state: 'MERGED' }),
+    cleanup: () => { cleanupCalls += 1; return { status: 'retry', pr: '5', issue: '1', branch: 'agent/1-demo', merge_mode: null, reason: 'fetch-failed', diagnostic: '' }; },
+    log: () => {},
+  });
+  runOnce(opts());
+  assert.equal(cleanupCalls, 1);
+  runOnce(opts());
+  assert.equal(cleanupCalls, 1, 'no automatic retry once an attention item exists');
+});
+
+test('runOnce resumes a pending candidate on the next cycle even if its worktree has vanished from discovery', () => {
+  const dir = tmpDir();
+  let cleanupCalls = 0;
+  saveStore(dir, {
+    'agent/1-demo': { branch: 'agent/1-demo', pr: '5', issue: '1', status: 'pending', reason: null, diagnostic: null, updatedAt: 'x' },
+  });
+  const store = runOnce(baseOptions({
+    stateDir: dir,
+    discover: () => [],
+    mint: () => { throw new Error('should not be called — candidate is already known to be terminal'); },
+    findPR: () => { throw new Error('should not be called — candidate is already known to be terminal'); },
+    cleanup: (pr, issue) => {
+      cleanupCalls += 1;
+      assert.equal(pr, '5');
+      assert.equal(issue, '1');
+      return { status: 'already-clean', pr: '5', issue: '1', branch: 'agent/1-demo', merge_mode: null, reason: 'nothing-to-clean', diagnostic: '' };
+    },
+    log: () => {},
+  }));
+  assert.equal(cleanupCalls, 1);
+  assert.equal(store['agent/1-demo'], undefined);
+});
+
+test('runOnce leaves an existing attention item alone even if its worktree has vanished from discovery', () => {
+  const dir = tmpDir();
+  saveStore(dir, {
+    'agent/1-demo': { branch: 'agent/1-demo', pr: '5', issue: '1', status: 'blocked', reason: 'worktree-dirty', diagnostic: 'x', updatedAt: 'x' },
+  });
+  const store = runOnce(baseOptions({
+    stateDir: dir,
+    discover: () => [],
+    mint: () => { throw new Error('should not be called'); },
+    findPR: () => { throw new Error('should not be called'); },
+    cleanup: () => { throw new Error('should not be called — no automatic retry'); },
+    log: () => {},
+  }));
+  assert.equal(store['agent/1-demo'].status, 'blocked');
+});
+
+test('runOnce logs and skips (writing no state) on a token mint failure', () => {
+  const options = baseOptions({
+    discover: () => [{ path: '/wt/1', branch: 'agent/1-demo', issueNumber: 1, slug: 'demo' }],
+    mint: () => { throw new Error('token mint failed'); },
+    findPR: () => { throw new Error('should not be called'); },
+    cleanup: () => { throw new Error('should not be called'); },
+    log: () => {},
+  });
+  const store = runOnce(options);
+  assert.deepEqual(store, {});
+});
+
+test('runOnce logs and skips (writing no state) on a PR lookup failure', () => {
   const options = baseOptions({
     discover: () => [{ path: '/wt/1', branch: 'agent/1-demo', issueNumber: 1, slug: 'demo' }],
     mint: () => 'tok',
     findPR: () => { throw new Error('gh pr list failed'); },
-    cleanup: () => { throw new Error('cleanup should not be called'); },
-    log: () => {},
-  });
-  const store = runOnce(options);
-  assert.equal(store['agent/1-demo'].outcome, 'retry');
-  assert.equal(store['agent/1-demo'].retryCount, 1);
-});
-
-test('runOnce invokes cleanup on a merged PR and clears state on success', () => {
-  let cleanupCalls = 0;
-  const options = baseOptions({
-    discover: () => [{ path: '/wt/1', branch: 'agent/1-demo', issueNumber: 1, slug: 'demo' }],
-    mint: () => 'tok',
-    findPR: () => ({ number: 5, state: 'MERGED' }),
-    cleanup: (pr, issue) => { cleanupCalls += 1; assert.equal(pr, 5); assert.equal(issue, 1); return { outcome: 'cleaned', stderr: '' }; },
-    log: () => {},
-  });
-  const store = runOnce(options);
-  assert.equal(cleanupCalls, 1);
-  assert.equal(store['agent/1-demo'], undefined);
-});
-
-test('runOnce records a blocked outcome with attention set', () => {
-  const options = baseOptions({
-    discover: () => [{ path: '/wt/1', branch: 'agent/1-demo', issueNumber: 1, slug: 'demo' }],
-    mint: () => 'tok',
-    findPR: () => ({ number: 5, state: 'MERGED' }),
-    cleanup: () => ({ outcome: 'blocked', stderr: 'Refusing to delete non-agent branch' }),
-    log: () => {},
-  });
-  const store = runOnce(options);
-  assert.equal(store['agent/1-demo'].outcome, 'blocked');
-  assert.equal(store['agent/1-demo'].attention, true);
-});
-
-test('runOnce escalates retry to blocked once maxRetries is reached, and does not repeat cleanup once blocked', () => {
-  const dir = tmpDir();
-  let cleanupCalls = 0;
-  const options = () => baseOptions({
-    stateDir: dir,
-    discover: () => [{ path: '/wt/1', branch: 'agent/1-demo', issueNumber: 1, slug: 'demo' }],
-    mint: () => 'tok',
-    findPR: () => ({ number: 5, state: 'MERGED' }),
-    cleanup: () => { cleanupCalls += 1; return { outcome: 'retry', stderr: '' }; },
-    log: () => {},
-    maxRetries: 3,
-  });
-  let store;
-  for (let i = 0; i < 3; i++) store = runOnce(options());
-  assert.equal(store['agent/1-demo'].outcome, 'blocked');
-  assert.equal(cleanupCalls, 3);
-  store = runOnce(options());
-  assert.equal(cleanupCalls, 3, 'cleanup must not be invoked again once blocked');
-});
-
-test('runOnce is idempotent across restarts: a branch that disappears from discovery after cleanup is not re-processed', () => {
-  const dir = tmpDir();
-  let cleanupCalls = 0;
-  const worktrees = [{ path: '/wt/1', branch: 'agent/1-demo', issueNumber: 1, slug: 'demo' }];
-  const run1 = runOnce(baseOptions({
-    stateDir: dir,
-    discover: () => worktrees,
-    mint: () => 'tok',
-    findPR: () => ({ number: 5, state: 'MERGED' }),
-    cleanup: () => { cleanupCalls += 1; return { outcome: 'cleaned', stderr: '' }; },
-    log: () => {},
-  }));
-  assert.equal(run1['agent/1-demo'], undefined);
-  assert.equal(cleanupCalls, 1);
-
-  // Restart: fresh process would reload the store from disk. Worktree is gone now.
-  const reloaded = loadStore(dir);
-  assert.equal(reloaded['agent/1-demo'], undefined);
-
-  const run2 = runOnce(baseOptions({
-    stateDir: dir,
-    discover: () => [], // worktree/branch no longer exist
-    mint: () => 'tok',
-    findPR: () => { throw new Error('should not be called — nothing discovered'); },
-    cleanup: () => { throw new Error('should not be called — nothing discovered'); },
-    log: () => {},
-  }));
-  assert.deepEqual(run2, {});
-  assert.equal(cleanupCalls, 1, 'cleanup must not run a second time for an already-cleaned branch');
-});
-
-test('runOnce escalates persistent token-mint (connectivity) failures to blocked after maxRetries cycles', () => {
-  const dir = tmpDir();
-  let mintCalls = 0;
-  const options = () => baseOptions({
-    stateDir: dir,
-    discover: () => [{ path: '/wt/1', branch: 'agent/1-demo', issueNumber: 1, slug: 'demo' }],
-    mint: () => { mintCalls += 1; throw new Error('token mint failed'); },
-    findPR: () => { throw new Error('findPR should not be called'); },
-    cleanup: () => { throw new Error('cleanup should not be called'); },
-    log: () => {},
-    maxRetries: 3,
-  });
-  let store;
-  for (let i = 0; i < 3; i++) store = runOnce(options());
-  assert.equal(store['agent/1-demo'].outcome, 'blocked');
-  assert.equal(store['agent/1-demo'].attention, true);
-  assert.equal(mintCalls, 3);
-  // Once blocked, the branch is skipped entirely — mint should not be called again.
-  store = runOnce(options());
-  assert.equal(mintCalls, 3, 'mint must not be invoked again once blocked');
-});
-
-test('runOnce does not pre-charge cleanup retries with prior connectivity-failure retries', () => {
-  const dir = tmpDir();
-  const options = (overrides) => baseOptions({
-    stateDir: dir,
-    discover: () => [{ path: '/wt/1', branch: 'agent/1-demo', issueNumber: 1, slug: 'demo' }],
-    log: () => {},
-    maxRetries: 5,
-    ...overrides,
-  });
-
-  // Build up connectivity-failure retryCount over a few cycles.
-  let store;
-  for (let i = 0; i < 3; i++) {
-    store = runOnce(options({
-      mint: () => { throw new Error('token mint failed'); },
-      findPR: () => { throw new Error('findPR should not be called'); },
-      cleanup: () => { throw new Error('cleanup should not be called'); },
-    }));
-  }
-  assert.equal(store['agent/1-demo'].outcome, 'retry');
-  assert.equal(store['agent/1-demo'].retryKind, 'connectivity');
-  assert.equal(store['agent/1-demo'].retryCount, 3);
-
-  // Now the PR merges and cleanup itself returns a single retry — the
-  // cleanup retryCount must reset to 1, not continue from 3.
-  store = runOnce(options({
-    mint: () => 'tok',
-    findPR: () => ({ number: 5, state: 'MERGED' }),
-    cleanup: () => ({ outcome: 'retry', stderr: '' }),
-  }));
-  assert.equal(store['agent/1-demo'].outcome, 'retry');
-  assert.equal(store['agent/1-demo'].retryKind, 'cleanup');
-  assert.equal(store['agent/1-demo'].retryCount, 1);
-});
-
-test('runOnce logs a warning when a branch in retry/blocked state disappears from discovery', () => {
-  const dir = tmpDir();
-  const logs = [];
-  const worktrees = [{ path: '/wt/1', branch: 'agent/1-demo', issueNumber: 1, slug: 'demo' }];
-
-  // First cycle: leave the branch in 'retry' state (cleanup keeps failing).
-  runOnce(baseOptions({
-    stateDir: dir,
-    discover: () => worktrees,
-    mint: () => 'tok',
-    findPR: () => ({ number: 5, state: 'MERGED' }),
-    cleanup: () => ({ outcome: 'retry', stderr: '' }),
-    log: (level, message) => logs.push({ level, message }),
-    maxRetries: 5,
-  }));
-
-  // Second cycle: the branch/worktree has vanished entirely.
-  const store = runOnce(baseOptions({
-    stateDir: dir,
-    discover: () => [],
-    mint: () => 'tok',
-    findPR: () => { throw new Error('should not be called'); },
     cleanup: () => { throw new Error('should not be called'); },
-    log: (level, message) => logs.push({ level, message }),
-    maxRetries: 5,
-  }));
-
-  assert.equal(store['agent/1-demo'], undefined);
-  assert.ok(
-    logs.some((l) => l.message.includes('disappeared') && l.message.includes('agent/1-demo')),
-    'expected a warning log mentioning the disappeared branch'
-  );
+    log: () => {},
+  });
+  const store = runOnce(options);
+  assert.deepEqual(store, {});
 });
 
 test('loop calls runOnce immediately and again after intervalMs, and stop() halts it', async () => {
@@ -260,7 +197,7 @@ test('loop calls runOnce immediately and again after intervalMs, and stop() halt
     discover: () => { calls += 1; return []; },
     mint: () => 'tok',
     findPR: () => null,
-    cleanup: () => ({ outcome: 'cleaned', stderr: '' }),
+    cleanup: () => ({ status: 'cleaned', pr: '1', issue: '1', branch: 'x', merge_mode: null, reason: 'x', diagnostic: '' }),
     log: () => {},
     intervalMs: 10,
   });
