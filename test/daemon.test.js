@@ -58,6 +58,32 @@ test('runOnce ignores branches with no PR at all', () => {
   assert.equal(store['agent/1-demo'].outcome, 'waiting');
 });
 
+test('runOnce records a retry on token mint failure and never calls findPR/cleanup', () => {
+  const options = baseOptions({
+    discover: () => [{ path: '/wt/1', branch: 'agent/1-demo', issueNumber: 1, slug: 'demo' }],
+    mint: () => { throw new Error('token mint failed'); },
+    findPR: () => { throw new Error('findPR should not be called'); },
+    cleanup: () => { throw new Error('cleanup should not be called'); },
+    log: () => {},
+  });
+  const store = runOnce(options);
+  assert.equal(store['agent/1-demo'].outcome, 'retry');
+  assert.equal(store['agent/1-demo'].retryCount, 1);
+});
+
+test('runOnce records a retry on PR lookup failure and never calls cleanup', () => {
+  const options = baseOptions({
+    discover: () => [{ path: '/wt/1', branch: 'agent/1-demo', issueNumber: 1, slug: 'demo' }],
+    mint: () => 'tok',
+    findPR: () => { throw new Error('gh pr list failed'); },
+    cleanup: () => { throw new Error('cleanup should not be called'); },
+    log: () => {},
+  });
+  const store = runOnce(options);
+  assert.equal(store['agent/1-demo'].outcome, 'retry');
+  assert.equal(store['agent/1-demo'].retryCount, 1);
+});
+
 test('runOnce invokes cleanup on a merged PR and clears state on success', () => {
   let cleanupCalls = 0;
   const options = baseOptions({
