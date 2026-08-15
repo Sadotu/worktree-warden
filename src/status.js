@@ -1,6 +1,7 @@
 import { loadStore } from './store.js';
 import { readLock } from './lock.js';
 import { readLogTail } from './log.js';
+import { DAEMON_ERROR_KEY } from './daemon.js';
 
 export function renderStatus(stateDir) {
   const store = loadStore(stateDir);
@@ -16,7 +17,11 @@ export function renderStatus(stateDir) {
   } else {
     lines.push('tracked candidates:');
     for (const [branch, candidate] of entries) {
-      if (candidate.status === 'pending') {
+      if (branch === DAEMON_ERROR_KEY) {
+        lines.push(
+          `  ! daemon error: ${candidate.status} (reason=${candidate.reason ?? 'unknown'}, diagnostic=${candidate.diagnostic ?? ''}, updated=${candidate.updatedAt})`
+        );
+      } else if (candidate.status === 'pending') {
         lines.push(`    ${branch}: pending (pr #${candidate.pr}, issue #${candidate.issue}, updated=${candidate.updatedAt})`);
       } else {
         lines.push(
