@@ -32,7 +32,7 @@ test('saveStore then loadStore round-trips, creating the dir', () => {
 
 test('getBranchState returns a default for an unknown branch', () => {
   assert.deepEqual(getBranchState({}, 'agent/1-demo'), {
-    outcome: null, retryCount: 0, attention: false, updatedAt: null,
+    outcome: null, retryCount: 0, retryKind: null, attention: false, updatedAt: null,
   });
 });
 

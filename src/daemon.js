@@ -33,8 +33,15 @@ export function runOnce(options = {}) {
     try {
       token = mint();
     } catch (err) {
-      log('warn', `${wt.branch}: token mint failed: ${err.message}`);
-      store = setBranchState(store, wt.branch, { outcome: 'retry', retryCount: branchState.retryCount + 1 });
+      const newRetryCount = branchState.retryKind === 'connectivity' ? branchState.retryCount + 1 : 1;
+      const outcome = classifyAfterRetries('retry', newRetryCount, maxRetries);
+      log(outcome === 'blocked' ? 'error' : 'warn', `${wt.branch}: token mint failed: ${err.message}`);
+      store = setBranchState(store, wt.branch, {
+        outcome,
+        retryCount: newRetryCount,
+        retryKind: 'connectivity',
+        attention: outcome === 'blocked',
+      });
       continue;
     }
 
@@ -42,8 +49,15 @@ export function runOnce(options = {}) {
     try {
       pr = findPR(wt.branch, token);
     } catch (err) {
-      log('warn', `${wt.branch}: PR lookup failed: ${err.message}`);
-      store = setBranchState(store, wt.branch, { outcome: 'retry', retryCount: branchState.retryCount + 1 });
+      const newRetryCount = branchState.retryKind === 'connectivity' ? branchState.retryCount + 1 : 1;
+      const outcome = classifyAfterRetries('retry', newRetryCount, maxRetries);
+      log(outcome === 'blocked' ? 'error' : 'warn', `${wt.branch}: PR lookup failed: ${err.message}`);
+      store = setBranchState(store, wt.branch, {
+        outcome,
+        retryCount: newRetryCount,
+        retryKind: 'connectivity',
+        attention: outcome === 'blocked',
+      });
       continue;
     }
 
@@ -63,7 +77,7 @@ export function runOnce(options = {}) {
       store = clearBranchState(store, wt.branch);
       continue;
     }
-    const nextRetryCount = branchState.retryCount + 1;
+    const nextRetryCount = branchState.retryKind === 'cleanup' ? branchState.retryCount + 1 : 1;
     const finalOutcome = classifyAfterRetries(result.outcome, nextRetryCount, maxRetries);
     log(
       finalOutcome === 'blocked' ? 'error' : 'warn',
@@ -72,12 +86,18 @@ export function runOnce(options = {}) {
     store = setBranchState(store, wt.branch, {
       outcome: finalOutcome,
       retryCount: nextRetryCount,
+      retryKind: 'cleanup',
       attention: finalOutcome === 'blocked',
     });
   }
 
   for (const branch of Object.keys(store)) {
-    if (!seen.has(branch)) store = clearBranchState(store, branch);
+    if (seen.has(branch)) continue;
+    const priorState = getBranchState(store, branch);
+    if (priorState.outcome === 'retry' || priorState.outcome === 'blocked') {
+      log('warn', `${branch}: disappeared from discovery while outcome was '${priorState.outcome}' — verify main/issue manually`);
+    }
+    store = clearBranchState(store, branch);
   }
 
   saveStore(stateDir, store);
