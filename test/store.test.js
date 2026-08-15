@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {
-  loadStore, saveStore, getBranchState, setBranchState, clearBranchState,
+  loadStore, saveStore, getCandidate, setPending, setAttention, clearCandidate,
 } from '../src/store.js';
 
 function tmpDir() {
@@ -24,30 +24,47 @@ test('loadStore returns {} on corrupt JSON', () => {
 
 test('saveStore then loadStore round-trips, creating the dir', () => {
   const dir = path.join(tmpDir(), 'nested');
-  saveStore(dir, { 'agent/1-demo': { outcome: 'waiting', retryCount: 0, attention: false, updatedAt: 'x' } });
+  saveStore(dir, {
+    'agent/1-demo': { branch: 'agent/1-demo', pr: '5', issue: '1', status: 'pending', reason: null, diagnostic: null, updatedAt: 'x' },
+  });
   assert.deepEqual(loadStore(dir), {
-    'agent/1-demo': { outcome: 'waiting', retryCount: 0, attention: false, updatedAt: 'x' },
+    'agent/1-demo': { branch: 'agent/1-demo', pr: '5', issue: '1', status: 'pending', reason: null, diagnostic: null, updatedAt: 'x' },
   });
 });
 
-test('getBranchState returns a default for an unknown branch', () => {
-  assert.deepEqual(getBranchState({}, 'agent/1-demo'), {
-    outcome: null, retryCount: 0, retryKind: null, attention: false, updatedAt: null,
-  });
+test('getCandidate returns null for an unknown branch', () => {
+  assert.equal(getCandidate({}, 'agent/1-demo'), null);
 });
 
-test('setBranchState merges and does not mutate the input', () => {
+test('setPending creates a pending candidate without mutating the input', () => {
   const before = {};
-  const after = setBranchState(before, 'agent/1-demo', { outcome: 'retry', retryCount: 1 });
+  const after = setPending(before, 'agent/1-demo', { pr: '5', issue: '1' });
   assert.deepEqual(before, {});
-  assert.equal(after['agent/1-demo'].outcome, 'retry');
-  assert.equal(after['agent/1-demo'].retryCount, 1);
-  assert.equal(typeof after['agent/1-demo'].updatedAt, 'string');
+  const candidate = getCandidate(after, 'agent/1-demo');
+  assert.equal(candidate.branch, 'agent/1-demo');
+  assert.equal(candidate.pr, '5');
+  assert.equal(candidate.issue, '1');
+  assert.equal(candidate.status, 'pending');
+  assert.equal(candidate.reason, null);
+  assert.equal(candidate.diagnostic, null);
+  assert.equal(typeof candidate.updatedAt, 'string');
 });
 
-test('clearBranchState removes the branch without mutating the input', () => {
-  const before = { 'agent/1-demo': { outcome: 'cleaned', retryCount: 0, attention: false, updatedAt: 'x' } };
-  const after = clearBranchState(before, 'agent/1-demo');
-  assert.deepEqual(before, { 'agent/1-demo': { outcome: 'cleaned', retryCount: 0, attention: false, updatedAt: 'x' } });
-  assert.deepEqual(after, {});
+test('setAttention records a terminal status without mutating the input', () => {
+  const before = setPending({}, 'agent/1-demo', { pr: '5', issue: '1' });
+  const after = setAttention(before, 'agent/1-demo', {
+    pr: '5', issue: '1', status: 'blocked', reason: 'worktree-dirty', diagnostic: 'uncommitted changes',
+  });
+  assert.equal(getCandidate(before, 'agent/1-demo').status, 'pending');
+  const candidate = getCandidate(after, 'agent/1-demo');
+  assert.equal(candidate.status, 'blocked');
+  assert.equal(candidate.reason, 'worktree-dirty');
+  assert.equal(candidate.diagnostic, 'uncommitted changes');
+});
+
+test('clearCandidate removes the branch without mutating the input', () => {
+  const before = setPending({}, 'agent/1-demo', { pr: '5', issue: '1' });
+  const after = clearCandidate(before, 'agent/1-demo');
+  assert.notEqual(getCandidate(before, 'agent/1-demo'), null);
+  assert.equal(getCandidate(after, 'agent/1-demo'), null);
 });
