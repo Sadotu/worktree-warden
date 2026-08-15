@@ -18,14 +18,24 @@ export function isProcessAlive(pid) {
 export function acquireLock(stateDir, pid = process.pid) {
   fs.mkdirSync(stateDir, { recursive: true });
   const file = lockFilePath(stateDir);
-  if (fs.existsSync(file)) {
-    const existingPid = Number(fs.readFileSync(file, 'utf8').trim());
-    if (isProcessAlive(existingPid)) {
-      throw new Error(`another worktree-warden instance is already running (pid ${existingPid})`);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    let fd;
+    try {
+      fd = fs.openSync(file, 'wx');
+    } catch (err) {
+      if (err.code !== 'EEXIST') throw err;
+      const existingPid = Number(fs.readFileSync(file, 'utf8').trim());
+      if (isProcessAlive(existingPid)) {
+        throw new Error(`another worktree-warden instance is already running (pid ${existingPid})`);
+      }
+      fs.unlinkSync(file);
+      continue;
     }
+    fs.writeSync(fd, String(pid));
+    fs.closeSync(fd);
+    return file;
   }
-  fs.writeFileSync(file, String(pid));
-  return file;
+  throw new Error(`failed to acquire lock at ${file} after reclaiming a stale entry`);
 }
 
 export function releaseLock(stateDir, pid = process.pid) {
