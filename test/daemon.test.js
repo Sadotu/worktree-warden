@@ -94,6 +94,24 @@ test('runOnce writes a blocked attention item when resolveTerminalCandidate repo
   const store = runOnce(options);
   assert.equal(store['agent/1-demo'].status, 'blocked');
   assert.equal(store['agent/1-demo'].reason, 'pr-issue-ambiguous');
+  assert.equal(store['agent/1-demo'].issue, null, 'an ambiguous result must not display a branch-derived issue number as confirmed');
+});
+
+test('runOnce refuses to resume a pending candidate with no pr identity, and blocks it instead of invoking cleanup', () => {
+  const dir = tmpDir();
+  saveStore(dir, {
+    'agent/1-demo': { branch: 'agent/1-demo', pr: null, issue: null, status: 'pending', reason: null, diagnostic: null, updatedAt: 'x' },
+  });
+  const store = runOnce(baseOptions({
+    stateDir: dir,
+    discover: () => [],
+    mint: () => { throw new Error('should not be called'); },
+    findPRs: () => { throw new Error('should not be called'); },
+    cleanup: () => { throw new Error('cleanup should not be called'); },
+    log: () => {},
+  }));
+  assert.equal(store['agent/1-demo'].status, 'blocked');
+  assert.equal(store['agent/1-demo'].reason, 'missing-pr-identity');
 });
 
 test('runOnce clears the candidate on already-clean', () => {
