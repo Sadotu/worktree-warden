@@ -91,27 +91,31 @@ Everything durable lives under `<git-common-dir>/worktree-warden/`:
 
 `worktree-warden` never automatically retries a candidate once an
 attention item is recorded for it — that is a deliberate design choice,
-not a bug. To retry after fixing the underlying problem (e.g. committing
-or stashing a dirty worktree, resolving a diverged `main`), edit that
-branch's entry in `state.json` and set its `"status"` field back to
-`"pending"` — leave `pr`, `issue`, and `branch` as they are. The next
-poll's resume pass invokes Phase 7 for it again. This works even if the
-worktree Phase 7 was cleaning up has already been removed, since
-resuming a pending candidate does not depend on discovery finding a
-worktree for it again.
+not a bug. Recovery differs depending on whether Phase 7 was ever
+actually invoked for the entry:
 
-Do not delete a candidate's entry to "reset" it, and do not delete the
-whole `state.json` file. Deleting a `pending` entry can abandon in-flight
-work with no way to rediscover it if its worktree is already gone;
-deleting the whole file discards every other tracked candidate along
-with it. Setting `status` back to `"pending"` is the only recovery path
-that is safe for both a pending candidate and an attention item.
+- **`pr` is set** (the attention item followed a real Phase 7 invocation —
+  status `blocked` or `retry` with a real PR number): fix the underlying
+  problem (e.g. committing or stashing a dirty worktree, resolving a
+  diverged `main`), then edit that branch's entry in `state.json` and set
+  its `"status"` field back to `"pending"` — leave `pr`, `issue`, and
+  `branch` as they are. The next poll's resume pass invokes Phase 7 for it
+  again, even if the worktree has since been removed.
+- **`pr` is `null`** (`token-mint-failed`, `pr-lookup-failed`, or
+  `pr-issue-ambiguous` — nothing was ever invoked, there is no candidate
+  identity to resume): fix the underlying problem (App token/`gh` auth,
+  network access, or the PR/issue relationship on GitHub itself), then
+  delete that branch's entry from `state.json` outright. The next poll
+  rediscovers the branch from scratch and re-resolves its PR. Setting
+  `status` back to `"pending"` on one of these does *not* work — there is
+  no `pr` to resume, and the daemon refuses to invoke Phase 7 without one
+  (see below).
 
 A whole-cycle failure not tied to any specific branch (e.g. the daemon
 can't resolve the repository at all) is recorded under the reserved
-state.json key `__runOnce__` and shown in `status` as `daemon error: ...`.
-Unlike a branch entry, this key holds no in-flight Phase 7 work, so it is
-always safe to delete outright rather than editing its status.
+`state.json` key `__runOnce__` and shown in `status` as `daemon error:
+...`. Like the `pr: null` case above, this key holds no in-flight Phase 7
+work, so it is always safe to delete outright.
 
 ## Releasing
 

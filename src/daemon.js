@@ -43,6 +43,14 @@ export function runOnce(options = {}) {
   for (const branch of Object.keys(store)) {
     const candidate = store[branch];
     if (candidate.status !== 'pending') continue;
+    if (!candidate.pr) {
+      log('error', `${branch}: pending candidate has no pr identity — delete this entry instead of setting it to pending; see README`);
+      store = setAttention(store, branch, {
+        pr: null, issue: candidate.issue ?? null, status: 'blocked', reason: 'missing-pr-identity', diagnostic: 'a pending candidate must have a pr set by a real Phase 7 invocation; this entry cannot be resumed',
+      });
+      saveStore(stateDir, store);
+      continue;
+    }
     resolveCandidate(branch, candidate.pr, candidate.issue);
   }
 
@@ -68,9 +76,10 @@ export function runOnce(options = {}) {
       continue;
     }
 
-    let rows;
+    let resolved;
     try {
-      rows = findPRs(wt.branch, token);
+      const rows = findPRs(wt.branch, token);
+      resolved = resolveTerminalCandidate(rows);
     } catch (err) {
       log('error', `${wt.branch}: PR lookup failed: ${err.message}`);
       store = setAttention(store, wt.branch, {
@@ -80,13 +89,12 @@ export function runOnce(options = {}) {
       continue;
     }
 
-    const resolved = resolveTerminalCandidate(rows);
     if (resolved.kind === 'waiting') continue;
 
     if (resolved.kind === 'ambiguous') {
       log('error', `${wt.branch}: blocked (pr/issue relationship unresolved): ${resolved.reason}`);
       store = setAttention(store, wt.branch, {
-        pr: null, issue: wt.issueNumber, status: 'blocked', reason: 'pr-issue-ambiguous', diagnostic: resolved.reason,
+        pr: null, issue: null, status: 'blocked', reason: 'pr-issue-ambiguous', diagnostic: resolved.reason,
       });
       saveStore(stateDir, store);
       continue;
