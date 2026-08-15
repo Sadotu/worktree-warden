@@ -32,6 +32,23 @@ test('saveStore then loadStore round-trips, creating the dir', () => {
   });
 });
 
+test('loadStore silently drops legacy/unrecognized entries but keeps well-formed candidates', () => {
+  const dir = tmpDir();
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(
+    path.join(dir, 'state.json'),
+    JSON.stringify({
+      'legacy-branch': { outcome: 'waiting', retryCount: 0, attention: false, updatedAt: 'x' },
+      'agent/1-demo': { branch: 'agent/1-demo', pr: '5', issue: '1', status: 'pending', reason: null, diagnostic: null, updatedAt: 'x' },
+    }),
+  );
+  const loaded = loadStore(dir);
+  assert.equal(loaded['legacy-branch'], undefined);
+  assert.deepEqual(loaded['agent/1-demo'], {
+    branch: 'agent/1-demo', pr: '5', issue: '1', status: 'pending', reason: null, diagnostic: null, updatedAt: 'x',
+  });
+});
+
 test('getCandidate returns null for an unknown branch', () => {
   assert.equal(getCandidate({}, 'agent/1-demo'), null);
 });

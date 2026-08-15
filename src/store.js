@@ -4,11 +4,19 @@ import path from 'node:path';
 export function loadStore(stateDir) {
   const file = path.join(stateDir, 'state.json');
   if (!fs.existsSync(file)) return {};
+  let parsed;
   try {
-    return JSON.parse(fs.readFileSync(file, 'utf8'));
+    parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
   } catch {
     return {};
   }
+  const filtered = {};
+  for (const [branch, entry] of Object.entries(parsed)) {
+    if (entry && typeof entry.status === 'string') {
+      filtered[branch] = entry;
+    }
+  }
+  return filtered;
 }
 
 export function saveStore(stateDir, store) {
