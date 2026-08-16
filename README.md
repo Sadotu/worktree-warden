@@ -1,24 +1,29 @@
 # worktree-warden
 
 Watches merged or closed-unmerged agent pull requests in the current
-repository and invokes the canonical `github-issue` Phase 7 cleanup
-(`cleanup-merged.sh <pr> <issue>`) so terminal agent worktrees, branches,
-and issues reconcile automatically.
+repository and invokes the configured terminal cleanup script
+(`<script> <pr> <issue>`) so terminal agent worktrees, branches, and issues
+reconcile automatically.
 
 It owns discovery, polling, candidate persistence, and diagnostics only.
 It never deletes a worktree/branch, advances `main`, or retries a failure
-automatically — all Git/GitHub mutation and safety logic stays in
-`cleanup-merged.sh` (from `agent-skills`).
+automatically — all Git/GitHub mutation and safety logic stays in the
+configured cleanup script.
 
 ## Requirements
 
 - Node.js >= 18, `git` and `gh` on `PATH`
 - A GitHub App token helper (`GH_APP_TOKEN_HELPER`, default
   `/opt/agent-devcontainer/gh-app-token.sh`)
-- `cleanup-merged.sh` at `WARDEN_CLEANUP_SCRIPT` (default
-  `<repo>/.agents/skills/github-issue/scripts/cleanup-merged.sh`), a
-  version emitting Phase 7's structured stdout JSON (`agent-skills#28`/`#41`
-  or later)
+- A terminal cleanup script at `WARDEN_CLEANUP_SCRIPT` emitting the
+  structured stdout JSON this daemon expects (`agent-skills#28`/`#41` or
+  later). The canonical script is `github-pr-cleanup/scripts/cleanup.sh`
+  (`agent-skills#47`): agent-devcontainer supplies `WARDEN_CLEANUP_SCRIPT`
+  pointing at it automatically (`agent-devcontainer#67`); standalone
+  installations must set `WARDEN_CLEANUP_SCRIPT` to it explicitly. The
+  built-in default below is the old bundled `github-issue` cleanup path and
+  is not used by the supported agent-devcontainer integration after this
+  migration — it is not a working fallback.
 
 ## Install
 
@@ -47,13 +52,13 @@ Each poll:
    (never the branch name). `OPEN`/no PR → left alone, checked again next
    poll for free.
 3. Once terminal (`MERGED`/`CLOSED`), persists the candidate (`pr`,
-   `issue`, `branch`) *before* invoking Phase 7, so a crash mid-invocation
-   can't lose it.
-4. Parses Phase 7's one stdout JSON record. `cleaned`/`already-clean`
+   `issue`, `branch`) *before* invoking the terminal cleanup script, so a
+   crash mid-invocation can't lose it.
+4. Parses the cleanup script's one stdout JSON record. `cleaned`/`already-clean`
    clears the candidate. Anything else — a failed mint, failed PR lookup,
    ambiguous PR/issue relationship (multiple terminal PRs, or zero/multiple
-   linked issues), invalid Phase 7 output, or a whole-cycle crash — writes
-   a permanent attention item immediately. Nothing is ever retried
+   linked issues), invalid cleanup-script output, or a whole-cycle crash —
+   writes a permanent attention item immediately. Nothing is ever retried
    automatically.
 
 ## Configuration
@@ -61,7 +66,7 @@ Each poll:
 | Env var | Default | Purpose |
 |---|---|---|
 | `WARDEN_POLL_INTERVAL_MS` | `60000` | Poll interval |
-| `WARDEN_CLEANUP_SCRIPT` | `<repo>/.agents/skills/github-issue/scripts/cleanup-merged.sh` | Phase 7 script |
+| `WARDEN_CLEANUP_SCRIPT` | `<repo>/.agents/skills/github-issue/scripts/cleanup-merged.sh` | Terminal cleanup script — old built-in path, not used by the supported agent-devcontainer integration after migration; see Requirements |
 | `GH_APP_TOKEN_HELPER` | `/opt/agent-devcontainer/gh-app-token.sh` | Token helper |
 
 ## State, locks, and logs
@@ -76,7 +81,7 @@ Under `<git-common-dir>/worktree-warden/`:
 ## Recovering from an attention item
 
 Never retried automatically — recovery is manual, and depends on whether
-Phase 7 was ever invoked:
+the terminal cleanup script was ever invoked:
 
 - **`pr` set** (a real invocation happened): fix the problem, set that
   entry's `status` back to `"pending"`. Resumed next poll, even if the
@@ -84,7 +89,8 @@ Phase 7 was ever invoked:
 - **`pr: null`** (`token-mint-failed`/`pr-lookup-failed`/`pr-issue-ambiguous`
   — nothing was invoked): fix the problem, delete the entry. Rediscovered
   fresh next poll. Setting `status` to `"pending"` won't work here — there's
-  no `pr` to resume, and the daemon refuses to invoke Phase 7 without one.
+  no `pr` to resume, and the daemon refuses to invoke the cleanup script
+  without one.
 
 A whole-cycle failure not tied to any branch lands under the reserved key
 `__runOnce__` (shown as `daemon error: ...` in `status`) — always safe to
