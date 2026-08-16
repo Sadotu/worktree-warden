@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 import { run as defaultRun } from './proc.js';
 
 const EXIT_CODE_FOR_STATUS = { cleaned: 0, 'already-clean': 0, waiting: 10, blocked: 20, retry: 30 };
@@ -17,6 +18,20 @@ function isValidRecord(record, exitCode, expectedPr, expectedIssue) {
 
 export function invokeCleanup(scriptPath, prNumber, issueNumber, opts = {}) {
   const run = opts.run ?? defaultRun;
+  const exists = opts.exists ?? fs.existsSync;
+
+  if (!exists(scriptPath)) {
+    return {
+      status: 'retry',
+      pr: String(prNumber),
+      issue: String(issueNumber),
+      branch: null,
+      merge_mode: null,
+      reason: 'cleanup-script-not-found',
+      diagnostic: `no cleanup script at ${scriptPath}; set WARDEN_CLEANUP_SCRIPT to point at a github-issue Phase 7 cleanup-merged.sh (see README)`,
+    };
+  }
+
   const result = run(scriptPath, [String(prNumber), String(issueNumber)], {});
   const stdout = (result.stdout ?? '').trim();
   const diagnostic = (result.stderr ?? '').trim();
