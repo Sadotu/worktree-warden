@@ -3,6 +3,7 @@ import { acquireLock, releaseLock } from './lock.js';
 import { loop } from './daemon.js';
 import { renderStatus } from './status.js';
 import { appendLog } from './log.js';
+import { loadStore, saveStore, getCandidate, clearCandidate } from './store.js';
 
 export function main(argv, { cwd = process.cwd(), stateDirOverride } = {}) {
   const command = argv[0];
@@ -10,6 +11,23 @@ export function main(argv, { cwd = process.cwd(), stateDirOverride } = {}) {
 
   if (command === 'status') {
     console.log(renderStatus(stateDir));
+    return 0;
+  }
+
+  if (command === 'clear') {
+    const branch = argv[1];
+    if (!branch) {
+      console.error('usage: worktree-warden clear <branch>');
+      return 1;
+    }
+    const store = loadStore(stateDir);
+    if (!getCandidate(store, branch)) {
+      console.error(`no tracked candidate for ${branch}`);
+      return 1;
+    }
+    saveStore(stateDir, clearCandidate(store, branch));
+    appendLog(stateDir, 'info', `${branch}: cleared by operator`);
+    console.log(`cleared ${branch}`);
     return 0;
   }
 

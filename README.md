@@ -31,6 +31,7 @@ npm install -g @nickysagan/worktree-warden
 ```bash
 worktree-warden          # start the watcher (foreground, polls every 60s)
 worktree-warden status   # print tracked candidates and attention items
+worktree-warden clear <branch>  # clear a blocked/retry entry after fixing the underlying condition
 ```
 
 ## How it works
@@ -59,11 +60,22 @@ candidate), `warden.pid` (self-healing single-instance lock), `warden.log`
 
 ## Recovering from an attention item
 
-Manual only. If `pr` is set, fix the problem and set `status` back to
-`"pending"` — resumed next poll. If `pr: null` (mint/lookup/ambiguity
-failure, nothing was invoked), fix the problem and delete the entry instead
-— it's rediscovered fresh. A whole-cycle failure lands under `__runOnce__`
-and is always safe to delete.
+Nothing retries automatically. Fix the underlying condition (e.g. clean the
+dirty primary worktree, restore the missing branch), then run:
+
+```bash
+worktree-warden clear <branch>
+```
+
+This removes the branch's `state.json` entry so it's rediscovered fresh on
+the next poll. A whole-cycle failure lands under the reserved key
+`__runOnce__` (shown as `daemon error: ...` in `status`) — also safe to
+clear the same way, it holds no in-flight work.
+
+`clear` always deletes the entry (it never edits `status` in place), so it
+works the same regardless of whether a cleanup script invocation already
+happened for that branch. Editing `state.json` by hand works too — `clear`
+is a thin wrapper around deleting the branch's key.
 
 ## Releasing
 
