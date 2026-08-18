@@ -31,6 +31,8 @@ npm install -g @nickysagan/worktree-warden
 ```bash
 worktree-warden          # start the watcher (foreground, polls every 60s)
 worktree-warden status   # print tracked candidates and attention items
+worktree-warden clear <branch>  # retry cleanup for one blocked/retry entry now
+worktree-warden clear --all     # retry cleanup for every blocked/retry entry now
 ```
 
 ## How it works
@@ -59,11 +61,17 @@ candidate), `warden.pid` (self-healing single-instance lock), `warden.log`
 
 ## Recovering from an attention item
 
-Manual only. If `pr` is set, fix the problem and set `status` back to
-`"pending"` — resumed next poll. If `pr: null` (mint/lookup/ambiguity
-failure, nothing was invoked), fix the problem and delete the entry instead
-— it's rediscovered fresh. A whole-cycle failure lands under `__runOnce__`
-and is always safe to delete.
+Nothing retries on its own. Fix the underlying condition, then run
+`worktree-warden clear <branch>` or `clear --all` (every `blocked`/`retry`
+entry; `pending` ones are already resumed each poll).
+
+If the entry has a `pr` on record, `clear` re-invokes the cleanup script
+with it — same call the daemon makes, bound by the same safety checks
+(e.g. still won't fast-forward `main` over a dirty worktree). Success
+removes the entry and exits `0`; still-failing entries are updated in
+place and `clear` exits `1`. Entries with no `pr` (nothing was ever
+invoked, or the `__runOnce__` whole-cycle key) are just deleted and
+rediscovered next poll. Editing `state.json` by hand still works too.
 
 ## Releasing
 

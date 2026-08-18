@@ -7,6 +7,29 @@ import { appendLog } from './log.js';
 
 export const DAEMON_ERROR_KEY = '__runOnce__';
 
+// Invokes cleanup for a candidate already known to have a `pr`, and folds
+// the result back into the store — `cleaned`/`already-clean` clears the
+// entry, anything else records it as an attention item. Shared by the
+// daemon's own passes and the CLI's `clear` command, so a manual retry
+// updates the store identically to an automatic one.
+export function applyCleanup(store, branch, pr, issue, { cleanup, log }) {
+  const result = cleanup(pr, issue);
+  if (result.status === 'cleaned' || result.status === 'already-clean') {
+    log('info', `${branch}: ${result.status} (pr #${pr}): ${result.reason ?? ''}`.trim());
+    return { store: clearCandidate(store, branch), result };
+  }
+  log(
+    'error',
+    `${branch}: ${result.status} (pr #${pr}): ${result.reason ?? ''} ${result.diagnostic ?? ''}`.trim()
+  );
+  return {
+    store: setAttention(store, branch, {
+      pr, issue, status: result.status, reason: result.reason, diagnostic: result.diagnostic,
+    }),
+    result,
+  };
+}
+
 export function runOnce(options = {}) {
   const cwd = options.cwd ?? process.cwd();
   const primaryWorkspace = options.primaryWorkspace ?? resolvePrimaryWorkspace(cwd);
@@ -22,19 +45,8 @@ export function runOnce(options = {}) {
   let store = loadStore(stateDir);
 
   const resolveCandidate = (branch, pr, issue) => {
-    const result = cleanup(pr, issue);
-    if (result.status === 'cleaned' || result.status === 'already-clean') {
-      log('info', `${branch}: ${result.status} (pr #${pr}): ${result.reason ?? ''}`.trim());
-      store = clearCandidate(store, branch);
-    } else {
-      log(
-        'error',
-        `${branch}: ${result.status} (pr #${pr}): ${result.reason ?? ''} ${result.diagnostic ?? ''}`.trim()
-      );
-      store = setAttention(store, branch, {
-        pr, issue, status: result.status, reason: result.reason, diagnostic: result.diagnostic,
-      });
-    }
+    const outcome = applyCleanup(store, branch, pr, issue, { cleanup, log });
+    store = outcome.store;
     saveStore(stateDir, store);
   };
 
