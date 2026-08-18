@@ -31,7 +31,8 @@ npm install -g @nickysagan/worktree-warden
 ```bash
 worktree-warden          # start the watcher (foreground, polls every 60s)
 worktree-warden status   # print tracked candidates and attention items
-worktree-warden clear <branch>  # clear a blocked/retry entry after fixing the underlying condition
+worktree-warden clear <branch>  # retry cleanup for one blocked/retry entry now
+worktree-warden clear --all     # retry cleanup for every blocked/retry entry now
 ```
 
 ## How it works
@@ -60,22 +61,30 @@ candidate), `warden.pid` (self-healing single-instance lock), `warden.log`
 
 ## Recovering from an attention item
 
-Nothing retries automatically. Fix the underlying condition (e.g. clean the
-dirty primary worktree, restore the missing branch), then run:
+Nothing retries automatically on its own. Fix the underlying condition
+(e.g. clean the dirty primary worktree, restore the missing branch), then
+run `worktree-warden clear <branch>` (one entry) or `worktree-warden clear
+--all` (every `blocked`/`retry` entry, `pending` ones left alone since
+they're already resumed each poll).
 
-```bash
-worktree-warden clear <branch>
-```
+`clear` doesn't just forget the entry — if it has a `pr` on record, it
+re-invokes the cleanup script immediately with that `pr`/`issue`, the same
+call the daemon itself would make. Success (`cleaned`/`already-clean`)
+removes the entry and exits `0`; still-failing entries are updated in place
+with the fresh reason/diagnostic and `clear` exits `1`, so a bulk `--all`
+run tells you exactly what's still stuck and why. `clear` never touches
+Git/GitHub itself — it only calls the same cleanup script the daemon calls,
+so it's bound by that script's own safety checks (e.g. it still won't
+fast-forward `main` over a dirty primary worktree).
 
-This removes the branch's `state.json` entry so it's rediscovered fresh on
-the next poll. A whole-cycle failure lands under the reserved key
-`__runOnce__` (shown as `daemon error: ...` in `status`) — also safe to
-clear the same way, it holds no in-flight work.
+If an entry has no `pr` on record (`token-mint-failed`/`pr-lookup-failed`/
+`pr-issue-ambiguous` — nothing was ever invoked for it), `clear` just
+deletes it, since there's nothing to retry; it's rediscovered fresh next
+poll. A whole-cycle failure under the reserved key `__runOnce__` (shown as
+`daemon error: ...` in `status`) has no `pr` either, so `clear` (or
+`--all`) deletes it the same way.
 
-`clear` always deletes the entry (it never edits `status` in place), so it
-works the same regardless of whether a cleanup script invocation already
-happened for that branch. Editing `state.json` by hand works too — `clear`
-is a thin wrapper around deleting the branch's key.
+Editing `state.json` by hand still works too.
 
 ## Releasing
 
