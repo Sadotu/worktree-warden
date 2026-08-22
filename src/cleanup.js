@@ -28,7 +28,7 @@ export function invokeCleanup(scriptPath, prNumber, issueNumber, opts = {}) {
       branch: null,
       merge_mode: null,
       reason: 'cleanup-script-not-found',
-      diagnostic: `no cleanup script at ${scriptPath}; set WARDEN_CLEANUP_SCRIPT to point at a github-issue Phase 7 cleanup-merged.sh (see README)`,
+      diagnostic: `no cleanup script at ${scriptPath}; set WARDEN_CLEANUP_SCRIPT to point at a github-pr-cleanup cleanup.sh (see README)`,
     };
   }
 

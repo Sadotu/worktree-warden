@@ -45,5 +45,5 @@ export function resolveStateDir(cwd = process.cwd(), run = defaultRun) {
 
 export function resolveCleanupScriptPath(primaryWorkspace) {
   if (process.env.WARDEN_CLEANUP_SCRIPT) return process.env.WARDEN_CLEANUP_SCRIPT;
-  return path.join(primaryWorkspace, '.agents/skills/github-issue/scripts/cleanup-merged.sh');
+  return path.join(primaryWorkspace, '.agents/skills/github-pr-cleanup/scripts/cleanup.sh');
 }

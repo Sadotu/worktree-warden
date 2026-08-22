@@ -16,9 +16,9 @@ mutation stays in the cleanup script.
 - A terminal cleanup script at `WARDEN_CLEANUP_SCRIPT` emitting the
   structured stdout JSON this daemon expects (`agent-skills#28`/`#41` or
   later). Canonical script: `github-pr-cleanup/scripts/cleanup.sh`
-  (`agent-skills#47`) — agent-devcontainer sets `WARDEN_CLEANUP_SCRIPT` to it
-  automatically; standalone installs must set it explicitly. The built-in
-  default below is the old bundled path and isn't a working fallback.
+  (`agent-skills#47`) — this is also the built-in default below, so
+  agent-devcontainer and any repo with that skill installed work without
+  setting the env var explicitly.
 
 ## Install
 
@@ -50,7 +50,7 @@ automatically.
 | Env var | Default | Purpose |
 |---|---|---|
 | `WARDEN_POLL_INTERVAL_MS` | `60000` | Poll interval |
-| `WARDEN_CLEANUP_SCRIPT` | `<repo>/.agents/skills/github-issue/scripts/cleanup-merged.sh` | Terminal cleanup script (old built-in path — see Requirements) |
+| `WARDEN_CLEANUP_SCRIPT` | `<repo>/.agents/skills/github-pr-cleanup/scripts/cleanup.sh` | Terminal cleanup script |
 | `GH_APP_TOKEN_HELPER` | `/opt/agent-devcontainer/gh-app-token.sh` | Token helper |
 
 ## State, locks, and logs
