@@ -67,7 +67,7 @@ test('resolveCleanupScriptPath defaults under the primary workspace', () => {
   delete process.env.WARDEN_CLEANUP_SCRIPT;
   assert.equal(
     resolveCleanupScriptPath('/workspaces/worktree-warden'),
-    '/workspaces/worktree-warden/.agents/skills/github-issue/scripts/cleanup-merged.sh'
+    '/workspaces/worktree-warden/.agents/skills/github-pr-cleanup/scripts/cleanup.sh'
   );
 });
 
