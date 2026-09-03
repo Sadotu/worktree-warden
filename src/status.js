@@ -23,6 +23,10 @@ export function renderStatus(stateDir) {
         );
       } else if (candidate.status === 'pending') {
         lines.push(`    ${branch}: pending (pr #${candidate.pr}, issue #${candidate.issue}, updated=${candidate.updatedAt})`);
+      } else if (candidate.status === 'retry' && candidate.nextRetryAt) {
+        lines.push(
+          `  ~ ${branch}: retry (pr #${candidate.pr ?? '—'}, issue #${candidate.issue ?? '—'}, reason=${candidate.reason ?? 'unknown'}, diagnostic=${candidate.diagnostic ?? ''}, attempt=${candidate.attempt}, next retry=${candidate.nextRetryAt}, updated=${candidate.updatedAt})`
+        );
       } else {
         lines.push(
           `  ! ${branch}: ${candidate.status} (pr #${candidate.pr ?? '—'}, issue #${candidate.issue ?? '—'}, reason=${candidate.reason ?? 'unknown'}, diagnostic=${candidate.diagnostic ?? ''}, updated=${candidate.updatedAt})`
@@ -31,8 +35,9 @@ export function renderStatus(stateDir) {
     }
   }
 
+  const retrying = entries.filter(([, candidate]) => candidate.status === 'retry' && candidate.nextRetryAt).length;
   const attentionCount = entries.filter(([, candidate]) => candidate.status !== 'pending').length;
-  lines.push(`attention items: ${attentionCount}`);
+  lines.push(`attention items: ${attentionCount} (${retrying} retrying, ${attentionCount - retrying} permanent)`);
 
   const tail = readLogTail(stateDir, 10);
   if (tail.length > 0) {

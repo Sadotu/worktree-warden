@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { runOnce, loop, DAEMON_ERROR_KEY } from '../src/daemon.js';
+import { runOnce, loop, DAEMON_ERROR_KEY, computeNextRetry } from '../src/daemon.js';
 import { loadStore, saveStore } from '../src/store.js';
 
 function tmpDir() {
@@ -48,9 +48,10 @@ test('runOnce persists a pending candidate using the GitHub-resolved issue, not 
   assert.equal(store['agent/1-demo'], undefined);
 });
 
-test('runOnce writes a permanent attention item on a token mint failure, with no retry', () => {
+test('runOnce writes a retryable attention item on a token mint failure, and does not retry before backoff elapses', () => {
   const dir = tmpDir();
   let mintCalls = 0;
+  let clock = 1_000_000;
   const opts = () => baseOptions({
     stateDir: dir,
     discover: () => [{ path: '/wt/1', branch: 'agent/1-demo', issueNumber: 1, slug: 'demo' }],
@@ -58,26 +59,121 @@ test('runOnce writes a permanent attention item on a token mint failure, with no
     findPRs: () => { throw new Error('should not be called'); },
     cleanup: () => { throw new Error('should not be called'); },
     log: () => {},
+    now: () => clock,
   });
   const store = runOnce(opts());
   assert.equal(store['agent/1-demo'].status, 'retry');
   assert.equal(store['agent/1-demo'].reason, 'token-mint-failed');
+  assert.equal(store['agent/1-demo'].attempt, 1);
   assert.equal(mintCalls, 1);
+
+  clock += 1000; // still well inside the 1-minute base backoff
   runOnce(opts());
-  assert.equal(mintCalls, 1, 'no automatic retry once an attention item exists');
+  assert.equal(mintCalls, 1, 'no retry before the backoff window elapses');
 });
 
-test('runOnce writes a permanent attention item on a PR lookup failure', () => {
+test('runOnce retries a token-mint failure automatically once backoff elapses, without manual state edits, and clears the entry on recovery', () => {
+  const dir = tmpDir();
+  let mintShouldFail = true;
+  let clock = 1_000_000;
+  const opts = () => baseOptions({
+    stateDir: dir,
+    discover: () => [{ path: '/wt/1', branch: 'agent/1-demo', issueNumber: 1, slug: 'demo' }],
+    mint: () => { if (mintShouldFail) throw new Error('401 Bad credentials'); return 'tok'; },
+    findPRs: () => [{ number: 5, state: 'MERGED', closingIssuesReferences: [{ number: 1 }] }],
+    cleanup: (pr, issue) => ({ status: 'cleaned', pr, issue, branch: 'agent/1-demo', merge_mode: 'regular', reason: 'cleanup-complete', diagnostic: '' }),
+    log: () => {},
+    now: () => clock,
+  });
+
+  runOnce(opts()); // fails, schedules retry ~1 minute out
+  const first = loadStore(dir)['agent/1-demo'];
+  assert.equal(first.attempt, 1);
+
+  clock = new Date(first.nextRetryAt).getTime() - 1;
+  runOnce(opts());
+  assert.equal(loadStore(dir)['agent/1-demo'].attempt, 1, 'still not due, no retry attempted');
+
+  clock = new Date(first.nextRetryAt).getTime();
+  mintShouldFail = false;
+  const store = runOnce(opts());
+  assert.equal(store['agent/1-demo'], undefined, 'credentials recovered — normal terminal-PR cleanup ran and cleared retry state');
+});
+
+test('runOnce writes a retryable attention item on a PR lookup failure (e.g. a transient EOF)', () => {
   const options = baseOptions({
     discover: () => [{ path: '/wt/1', branch: 'agent/1-demo', issueNumber: 1, slug: 'demo' }],
     mint: () => 'tok',
-    findPRs: () => { throw new Error('gh pr list failed'); },
+    findPRs: () => { throw new Error('unexpected EOF'); },
     cleanup: () => { throw new Error('should not be called'); },
     log: () => {},
   });
   const store = runOnce(options);
   assert.equal(store['agent/1-demo'].status, 'retry');
   assert.equal(store['agent/1-demo'].reason, 'pr-lookup-failed');
+  assert.equal(store['agent/1-demo'].attempt, 1);
+  assert.match(store['agent/1-demo'].diagnostic, /unexpected EOF/);
+});
+
+test('runOnce clears stale retry state once a PR lookup recovers but the PR is still open (not yet terminal)', () => {
+  const dir = tmpDir();
+  let clock = 1_000_000;
+  const opts = (findPRs) => baseOptions({
+    stateDir: dir,
+    discover: () => [{ path: '/wt/1', branch: 'agent/1-demo', issueNumber: 1, slug: 'demo' }],
+    mint: () => 'tok',
+    findPRs,
+    cleanup: () => { throw new Error('should not be called'); },
+    log: () => {},
+    now: () => clock,
+  });
+
+  runOnce(opts(() => { throw new Error('EOF'); }));
+  const first = loadStore(dir)['agent/1-demo'];
+  clock = new Date(first.nextRetryAt).getTime();
+
+  const store = runOnce(opts(() => [{ number: 5, state: 'OPEN', closingIssuesReferences: [{ number: 1 }] }]));
+  assert.equal(store['agent/1-demo'], undefined, 'no more retry/attention entry once the PR is confirmed still open');
+});
+
+test('computeNextRetry uses bounded exponential backoff capped at a finite maximum interval', () => {
+  const now = 0;
+  let attempt = null;
+  const delays = [];
+  for (let i = 0; i < 12; i += 1) {
+    const next = computeNextRetry(attempt, now);
+    attempt = next.attempt;
+    delays.push(new Date(next.nextRetryAt).getTime() - now);
+  }
+  assert.deepEqual(delays.slice(0, 5), [60_000, 120_000, 240_000, 480_000, 960_000]);
+  const max = Math.max(...delays);
+  assert.ok(max <= 30 * 60_000, `expected a finite cap, got ${max}ms`);
+  assert.equal(delays[delays.length - 1], max, 'delay must stop growing once capped');
+});
+
+test('runOnce persists retry attempt/nextRetryAt across a simulated daemon restart', () => {
+  const dir = tmpDir();
+  let clock = 1_000_000;
+  const opts = () => baseOptions({
+    stateDir: dir,
+    discover: () => [{ path: '/wt/1', branch: 'agent/1-demo', issueNumber: 1, slug: 'demo' }],
+    mint: () => { throw new Error('network unreachable'); },
+    findPRs: () => { throw new Error('should not be called'); },
+    cleanup: () => { throw new Error('should not be called'); },
+    log: () => {},
+    now: () => clock,
+  });
+
+  runOnce(opts()); // "first daemon process"
+  const persisted = loadStore(dir)['agent/1-demo'];
+  assert.equal(persisted.attempt, 1);
+
+  // Simulate a fresh process: nothing but stateDir carries over, and the
+  // in-memory `store` variable from the call above is discarded.
+  clock = new Date(persisted.nextRetryAt).getTime();
+  runOnce(opts()); // "restarted daemon process"
+  const after = loadStore(dir)['agent/1-demo'];
+  assert.equal(after.attempt, 2, 'the restarted process resumed backoff from the persisted attempt count');
 });
 
 test('runOnce writes a blocked attention item when resolveTerminalCandidate reports ambiguous', () => {
