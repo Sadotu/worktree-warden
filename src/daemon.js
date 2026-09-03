@@ -7,6 +7,22 @@ import { appendLog } from './log.js';
 
 export const DAEMON_ERROR_KEY = '__runOnce__';
 
+// Bounded exponential backoff for operational PR-lookup failures (token
+// mint, `gh pr list`): 1m, 2m, 4m, ... capped at 30m so a still-down
+// GitHub App or network doesn't produce a tight retry loop or noisy logs.
+const RETRY_BASE_MS = 60_000;
+const RETRY_MAX_MS = 30 * 60_000;
+
+export function computeNextRetry(previousAttempt, nowMs) {
+  const attempt = (previousAttempt ?? 0) + 1;
+  const delayMs = Math.min(RETRY_MAX_MS, RETRY_BASE_MS * 2 ** (attempt - 1));
+  return { attempt, nextRetryAt: new Date(nowMs + delayMs).toISOString() };
+}
+
+function isRetryDue(candidate, nowMs) {
+  return !candidate.nextRetryAt || new Date(candidate.nextRetryAt).getTime() <= nowMs;
+}
+
 // Invokes cleanup for a candidate already known to have a `pr`, and folds
 // the result back into the store — `cleaned`/`already-clean` clears the
 // entry, anything else records it as an attention item. Shared by the
@@ -41,6 +57,7 @@ export function runOnce(options = {}) {
   const findPRs = options.findPRs ?? ((branch, token) => findPullRequestsForBranch(repoSlug, branch, token));
   const cleanup = options.cleanup ?? ((pr, issue) => invokeCleanup(cleanupScript, pr, issue));
   const log = options.log ?? ((level, message) => appendLog(stateDir, level, message));
+  const now = options.now ?? (() => Date.now());
 
   let store = loadStore(stateDir);
 
@@ -67,22 +84,28 @@ export function runOnce(options = {}) {
   }
 
   // Pass 2: discover newly terminal candidates among currently-visible
-  // agent worktrees that have no store entry yet. Every failure here — a
-  // failed mint, a failed PR lookup, or an ambiguous PR/issue relationship
-  // — writes a permanent attention item immediately. None of them is
-  // retried automatically; the branch is simply skipped on every future
-  // cycle until a human clears it.
+  // agent worktrees. A branch with no store entry yet is looked up fresh.
+  // A branch already tracked as an operational retry (`status: 'retry'`,
+  // `pr: null` — token mint or PR-lookup itself failed, so no pr/issue was
+  // ever resolved) is looked up again once its backoff window has elapsed.
+  // Anything else already tracked — `pending`, `blocked`, or a cleanup-level
+  // `retry` with a `pr` on record (Pass 1's territory) — is left alone.
+  // An ambiguous PR/issue relationship still writes a permanent attention
+  // item; a human must resolve it.
+  const nowMs = now();
   const worktrees = discover();
   for (const wt of worktrees) {
-    if (getCandidate(store, wt.branch)) continue; // pending (Pass 1 handled it) or has an attention item (no auto-retry)
+    const existing = getCandidate(store, wt.branch);
+    if (existing && !(existing.status === 'retry' && !existing.pr && isRetryDue(existing, nowMs))) continue;
 
     let token;
     try {
       token = mint();
     } catch (err) {
       log('error', `${wt.branch}: token mint failed: ${err.message}`);
+      const { attempt, nextRetryAt } = computeNextRetry(existing?.attempt, nowMs);
       store = setAttention(store, wt.branch, {
-        pr: null, issue: wt.issueNumber, status: 'retry', reason: 'token-mint-failed', diagnostic: err.message,
+        pr: null, issue: wt.issueNumber, status: 'retry', reason: 'token-mint-failed', diagnostic: err.message, attempt, nextRetryAt,
       });
       saveStore(stateDir, store);
       continue;
@@ -94,14 +117,22 @@ export function runOnce(options = {}) {
       resolved = resolveTerminalCandidate(rows);
     } catch (err) {
       log('error', `${wt.branch}: PR lookup failed: ${err.message}`);
+      const { attempt, nextRetryAt } = computeNextRetry(existing?.attempt, nowMs);
       store = setAttention(store, wt.branch, {
-        pr: null, issue: wt.issueNumber, status: 'retry', reason: 'pr-lookup-failed', diagnostic: err.message,
+        pr: null, issue: wt.issueNumber, status: 'retry', reason: 'pr-lookup-failed', diagnostic: err.message, attempt, nextRetryAt,
       });
       saveStore(stateDir, store);
       continue;
     }
 
-    if (resolved.kind === 'waiting') continue;
+    if (resolved.kind === 'waiting') {
+      if (existing) {
+        log('info', `${wt.branch}: recovered (still waiting on a terminal PR state); cleared retry state`);
+        store = clearCandidate(store, wt.branch);
+        saveStore(stateDir, store);
+      }
+      continue;
+    }
 
     if (resolved.kind === 'ambiguous') {
       log('error', `${wt.branch}: blocked (pr/issue relationship unresolved): ${resolved.reason}`);

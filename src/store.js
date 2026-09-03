@@ -41,11 +41,14 @@ export function setPending(store, branch, { pr, issue }) {
   };
 }
 
-export function setAttention(store, branch, { pr, issue, status, reason, diagnostic }) {
+export function setAttention(store, branch, {
+  pr, issue, status, reason, diagnostic, attempt = null, nextRetryAt = null,
+}) {
   return {
     ...store,
     [branch]: {
       branch, pr, issue, status, reason: reason ?? null, diagnostic: diagnostic ?? null,
+      attempt, nextRetryAt,
       updatedAt: new Date().toISOString(),
     },
   };
