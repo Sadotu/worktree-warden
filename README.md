@@ -18,14 +18,18 @@ cleanup script) is a permanent attention item that needs a human.
 - A terminal cleanup script at `WARDEN_CLEANUP_SCRIPT` emitting the
   structured stdout JSON this daemon expects (`agent-skills#28`/`#41` or
   later). Canonical script: `github-pr-cleanup/scripts/cleanup.sh`
-  (`agent-skills#47`) — this is also the built-in default below, so
-  agent-devcontainer and any repo with that skill **installed** work
-  without setting the env var explicitly. A **source checkout** of the
-  skill (executable at `<repo>/skills/github-pr-cleanup/scripts/cleanup.sh`
-  — no `.agents/` prefix, no `.agents/skills/github-pr-cleanup` directory)
-  does not match that default and must set `WARDEN_CLEANUP_SCRIPT`
-  explicitly to its own path. Verify whatever it resolves to before
-  trusting it:
+  (`agent-skills#47`), which the skill can live at under either of two
+  layouts: **installed**
+  (`<repo>/.agents/skills/github-pr-cleanup/scripts/cleanup.sh`) or
+  **source checkout** (`<repo>/skills/github-pr-cleanup/scripts/cleanup.sh`
+  — no `.agents/` prefix). When `WARDEN_CLEANUP_SCRIPT` is unset, Warden
+  checks the installed path first, then the source-checkout path, and uses
+  whichever exists on disk — no env var needed for either layout by
+  itself. An explicit `WARDEN_CLEANUP_SCRIPT` always wins over that
+  discovery unconditionally, including when it's set to something that
+  doesn't exist — an invalid explicit override is a configuration error,
+  not silently replaced by the discovered path. Verify whatever it
+  resolves to before trusting it:
   ```bash
   test -x "${WARDEN_CLEANUP_SCRIPT:-<repo>/.agents/skills/github-pr-cleanup/scripts/cleanup.sh}" \
     && echo ok || echo "missing or not executable"
@@ -68,13 +72,12 @@ a permanent attention item; nothing retries it automatically.
 | Env var | Default | Purpose |
 |---|---|---|
 | `WARDEN_POLL_INTERVAL_MS` | `60000` | Poll interval |
-| `WARDEN_CLEANUP_SCRIPT` | `<repo>/.agents/skills/github-pr-cleanup/scripts/cleanup.sh` | Terminal cleanup script |
+| `WARDEN_CLEANUP_SCRIPT` | first of `.agents/skills/github-pr-cleanup/scripts/cleanup.sh` (installed) or `skills/github-pr-cleanup/scripts/cleanup.sh` (source checkout) found under `<repo>`, else the installed path | Terminal cleanup script |
 | `GH_APP_TOKEN_HELPER` | `/opt/agent-devcontainer/gh-app-token.sh` | Token helper |
 
-The default assumes the **installed-skill layout**. A **source checkout**
-(see Requirements) must set `WARDEN_CLEANUP_SCRIPT` explicitly to its own
-`skills/github-pr-cleanup/scripts/cleanup.sh` path — the built-in default is
-not a working fallback there.
+The two-layout auto-detection above only runs when `WARDEN_CLEANUP_SCRIPT`
+is unset (see Requirements). Setting it — as agent-devcontainer's launcher
+does — always wins, even if the value is wrong for this repo's layout.
 
 ## State, locks, and logs
 
@@ -105,10 +108,13 @@ rediscovered next poll. Editing `state.json` by hand still works too.
 
 Recognize this case by an attention item's `reason: cleanup-script-not-found`
 (or an `invocation-failed` diagnostic naming an `ENOENT` on the configured
-path) — the resolved script doesn't exist at that path. This is usually a
-layout mismatch: the built-in default and most explicit overrides assume the
-**installed-skill layout**, but a **source checkout** ships the script at a
-different path (see Requirements). Fix it:
+path) — the resolved script doesn't exist at that path. Auto-detection (see
+Requirements) already covers a repo where `WARDEN_CLEANUP_SCRIPT` is simply
+unset — so if you're hitting this, either the skill isn't present under
+either layout at all, or (most likely, e.g. an agent-devcontainer launcher)
+something is setting `WARDEN_CLEANUP_SCRIPT` explicitly to a path that's
+wrong for how this repo actually has the skill. An explicit value always
+wins over auto-detection, wrong or not. Fix it:
 
 1. Pick the path that matches how this repo actually has the skill —
    installed (`.agents/skills/github-pr-cleanup/scripts/cleanup.sh`) or
@@ -119,7 +125,9 @@ different path (see Requirements). Fix it:
    may export its own `WARDEN_CLEANUP_SCRIPT` on every start, silently
    overwriting a shell-level `export` — if cleanup keeps failing after
    fixing the shell env, check what the daemon's actual environment (and
-   the launcher that set it) is passing instead.
+   the launcher that set it) is passing instead. Unsetting the var
+   entirely (instead of pointing it at the right path) also works, since
+   auto-detection will then find it, unless the launcher always re-sets it.
 3. Restart the daemon so it picks up the corrected value, then run
    `worktree-warden clear <branch>` or `clear --all` — correcting the path
    alone does not retroactively fix entries already stuck on the old one.
