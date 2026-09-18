@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 import path from 'node:path';
 import { run as defaultRun } from './proc.js';
 
@@ -43,7 +44,11 @@ export function resolveStateDir(cwd = process.cwd(), run = defaultRun) {
   return path.join(resolveGitCommonDir(cwd, run), 'worktree-warden');
 }
 
-export function resolveCleanupScriptPath(primaryWorkspace) {
+export function resolveCleanupScriptPath(primaryWorkspace, exists = fs.existsSync) {
   if (process.env.WARDEN_CLEANUP_SCRIPT) return process.env.WARDEN_CLEANUP_SCRIPT;
-  return path.join(primaryWorkspace, '.agents/skills/github-pr-cleanup/scripts/cleanup.sh');
+  const installed = path.join(primaryWorkspace, '.agents/skills/github-pr-cleanup/scripts/cleanup.sh');
+  const sourceCheckout = path.join(primaryWorkspace, 'skills/github-pr-cleanup/scripts/cleanup.sh');
+  if (exists(installed)) return installed;
+  if (exists(sourceCheckout)) return sourceCheckout;
+  return installed;
 }
