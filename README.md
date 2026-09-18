@@ -19,8 +19,17 @@ cleanup script) is a permanent attention item that needs a human.
   structured stdout JSON this daemon expects (`agent-skills#28`/`#41` or
   later). Canonical script: `github-pr-cleanup/scripts/cleanup.sh`
   (`agent-skills#47`) — this is also the built-in default below, so
-  agent-devcontainer and any repo with that skill installed work without
-  setting the env var explicitly.
+  agent-devcontainer and any repo with that skill **installed** work
+  without setting the env var explicitly. A **source checkout** of the
+  skill (executable at `<repo>/skills/github-pr-cleanup/scripts/cleanup.sh`
+  — no `.agents/` prefix, no `.agents/skills/github-pr-cleanup` directory)
+  does not match that default and must set `WARDEN_CLEANUP_SCRIPT`
+  explicitly to its own path. Verify whatever it resolves to before
+  trusting it:
+  ```bash
+  test -x "${WARDEN_CLEANUP_SCRIPT:-<repo>/.agents/skills/github-pr-cleanup/scripts/cleanup.sh}" \
+    && echo ok || echo "missing or not executable"
+  ```
 
 ## Install
 
@@ -62,6 +71,11 @@ a permanent attention item; nothing retries it automatically.
 | `WARDEN_CLEANUP_SCRIPT` | `<repo>/.agents/skills/github-pr-cleanup/scripts/cleanup.sh` | Terminal cleanup script |
 | `GH_APP_TOKEN_HELPER` | `/opt/agent-devcontainer/gh-app-token.sh` | Token helper |
 
+The default assumes the **installed-skill layout**. A **source checkout**
+(see Requirements) must set `WARDEN_CLEANUP_SCRIPT` explicitly to its own
+`skills/github-pr-cleanup/scripts/cleanup.sh` path — the built-in default is
+not a working fallback there.
+
 ## State, locks, and logs
 
 Under `<git-common-dir>/worktree-warden/`: `state.json` (one entry per
@@ -86,6 +100,29 @@ removes the entry and exits `0`; still-failing entries are updated in
 place and `clear` exits `1`. Entries with no `pr` (nothing was ever
 invoked, or the `__runOnce__` whole-cycle key) are just deleted and
 rediscovered next poll. Editing `state.json` by hand still works too.
+
+### Recovering from an invalid `WARDEN_CLEANUP_SCRIPT`
+
+Recognize this case by an attention item's `reason: cleanup-script-not-found`
+(or an `invocation-failed` diagnostic naming an `ENOENT` on the configured
+path) — the resolved script doesn't exist at that path. This is usually a
+layout mismatch: the built-in default and most explicit overrides assume the
+**installed-skill layout**, but a **source checkout** ships the script at a
+different path (see Requirements). Fix it:
+
+1. Pick the path that matches how this repo actually has the skill —
+   installed (`.agents/skills/github-pr-cleanup/scripts/cleanup.sh`) or
+   source checkout (`skills/github-pr-cleanup/scripts/cleanup.sh`) — and
+   confirm it with the `test -x` check from Requirements.
+2. Set `WARDEN_CLEANUP_SCRIPT` to that path for the **daemon process**, not
+   just your interactive shell. A launcher/wrapper that starts the daemon
+   may export its own `WARDEN_CLEANUP_SCRIPT` on every start, silently
+   overwriting a shell-level `export` — if cleanup keeps failing after
+   fixing the shell env, check what the daemon's actual environment (and
+   the launcher that set it) is passing instead.
+3. Restart the daemon so it picks up the corrected value, then run
+   `worktree-warden clear <branch>` or `clear --all` — correcting the path
+   alone does not retroactively fix entries already stuck on the old one.
 
 ## Releasing
 
